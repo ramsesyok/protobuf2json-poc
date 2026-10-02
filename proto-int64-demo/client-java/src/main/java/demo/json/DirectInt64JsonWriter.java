@@ -3,18 +3,34 @@ package demo.json;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import com.google.protobuf.BoolValue;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.BytesValue;
+import com.google.protobuf.DoubleValue;
+import com.google.protobuf.Duration;
+import com.google.protobuf.FloatValue;
+import com.google.protobuf.Int32Value;
+import com.google.protobuf.Int64Value;
+import com.google.protobuf.StringValue;
+import com.google.protobuf.Timestamp;
+import com.google.protobuf.UInt32Value;
+import com.google.protobuf.UInt64Value;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
+import com.google.protobuf.Descriptors.OneofDescriptor;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.MessageOrBuilder;
+import com.google.protobuf.util.Durations;
 import com.google.protobuf.util.JsonFormat;
+import com.google.protobuf.util.Timestamps;
 
 import java.io.IOException;
 import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,7 +47,8 @@ import java.util.concurrent.ConcurrentMap;
  *   <li>uint64 / fixed64 は JsonFormat と同じく符号なし 10 進の文字列(対象外)</li>
  *   <li>uint32 / fixed32 は符号なしの数値、enum は名前(未知の値は数値)、bytes は Base64(パディングあり)</li>
  *   <li>float / double は NaN・Infinity を文字列、それ以外を数値</li>
- *   <li>Well-Known Types(google.protobuf.*)は JsonFormat で出力した断片をそのまま埋め込む(対象外)</li>
+ *   <li>Well-Known Types(google.protobuf.*)は JsonFormat と同じ表現(対象外。int64 系ラッパーも文字列のまま)。
+ *       Timestamp / Duration / ラッパー型は直接書き、それ以外(Any / Struct 等)は JsonFormat の出力を埋め込む</li>
  * </ul>
  * <b>未対応</b>: map フィールド(値があれば {@link UnsupportedOperationException})、group、
  * Printer のオプション(preservingProtoFieldNames / alwaysPrintFieldsWithNoPresence 等)。
@@ -44,6 +61,8 @@ public final class DirectInt64JsonWriter {
     private static final JsonFactory FACTORY = Int64JsonConverter.mapper().getFactory();
     private static final JsonFormat.Printer WKT_PRINTER = JsonFormat.printer().omittingInsignificantWhitespace();
     private static final Base64.Encoder BASE64 = Base64.getEncoder();
+
+    private static final Object NO_CASE = new Object();
 
     /** Descriptor ごとのフィールド番号順のフィールド一覧。 */
     private static final ConcurrentMap<Descriptor, FieldDescriptor[]> FIELDS_BY_NUMBER = new ConcurrentHashMap<>();
@@ -92,10 +111,13 @@ public final class DirectInt64JsonWriter {
     private static void writeMessage(MessageOrBuilder m, JsonGenerator g) throws IOException {
         Descriptor descriptor = m.getDescriptorForType();
         if (Int64JsonConverter.isWellKnownType(descriptor)) {
-            writeWellKnownType(m, g);
+            if (!writeWellKnownTypeFast(m, g)) {
+                writeWellKnownType(m, g);
+            }
             return;
         }
         g.writeStartObject();
+        Object[] oneofCases = null; // oneof の index → 設定されているメンバー(未設定は NO_CASE)。遅延計算
         for (FieldDescriptor field : fieldsByNumber(descriptor)) {
             if (field.isRepeated()) {
                 int count = m.getRepeatedFieldCount(field);
@@ -111,8 +133,26 @@ public final class DirectInt64JsonWriter {
                     writeValue(field, m.getRepeatedField(field, i), g);
                 }
                 g.writeEndArray();
-            } else if (m.hasField(field)) {
-                // proto3 の presence 無しスカラーは、デフォルト値なら hasField() が false になる
+            } else {
+                OneofDescriptor oneof = field.getRealContainingOneof();
+                if (oneof != null) {
+                    // oneof は「どのメンバーが設定されているか」を 1 回だけ調べ、他のメンバーの hasField を省く
+                    if (oneofCases == null) {
+                        oneofCases = new Object[descriptor.getOneofCount()];
+                    }
+                    Object setCase = oneofCases[oneof.getIndex()];
+                    if (setCase == null) {
+                        FieldDescriptor set = m.getOneofFieldDescriptor(oneof);
+                        setCase = set == null ? NO_CASE : set;
+                        oneofCases[oneof.getIndex()] = setCase;
+                    }
+                    if (setCase != field) {
+                        continue;
+                    }
+                } else if (!m.hasField(field)) {
+                    // proto3 の presence 無しスカラーは、デフォルト値なら hasField() が false になる
+                    continue;
+                }
                 g.writeFieldName(field.getJsonName());
                 writeValue(field, m.getField(field), g);
             }
@@ -164,6 +204,83 @@ public final class DirectInt64JsonWriter {
         return FIELDS_BY_NUMBER.computeIfAbsent(descriptor, d -> d.getFields().stream()
                 .sorted(Comparator.comparingInt(FieldDescriptor::getNumber))
                 .toArray(FieldDescriptor[]::new));
+    }
+
+    /**
+     * よく使う WKT を JsonFormat と同じ関数・規則で直接書く(JsonFormat の呼び出しと再パースを省く)。
+     * Timestamp / Duration は JsonFormat 内部と同じ {@link Timestamps#toString} / {@link Durations#toString}。
+     * ラッパー型は中の value を通常フィールドと同じ規則で書く。ただし Int64Value / UInt64Value は
+     * JsonFormat と同じく文字列のまま(対象外)。
+     *
+     * @return 書いた場合 true。生成コード以外(DynamicMessage 等)や上記以外の WKT は false
+     */
+    private static boolean writeWellKnownTypeFast(MessageOrBuilder m, JsonGenerator g) throws IOException {
+        if (m instanceof Timestamp t) {
+            g.writeString(formatTimestamp(t));
+            return true;
+        }
+        if (m instanceof Duration d) {
+            g.writeString(Durations.toString(d));
+            return true;
+        }
+        if (m instanceof Int64Value v) {
+            g.writeString(Long.toString(v.getValue()));
+            return true;
+        }
+        if (m instanceof UInt64Value v) {
+            g.writeString(Long.toUnsignedString(v.getValue()));
+            return true;
+        }
+        if (m instanceof Int32Value || m instanceof UInt32Value || m instanceof BoolValue || m instanceof StringValue
+                || m instanceof BytesValue || m instanceof FloatValue || m instanceof DoubleValue) {
+            FieldDescriptor value = m.getDescriptorForType().findFieldByNumber(1);
+            writeValue(value, m.getField(value), g);
+            return true;
+        }
+        return false;
+    }
+
+    private static final long MIN_TIMESTAMP_SECONDS = -62135596800L; // 0001-01-01T00:00:00Z
+    private static final long MAX_TIMESTAMP_SECONDS = 253402300799L;  // 9999-12-31T23:59:59Z
+
+    /**
+     * {@link Timestamps#toString} と同じ RFC 3339 文字列を作る(小数部は 0 / 3 / 6 / 9 桁、末尾 Z)。
+     * Timestamps.toString は内部で SimpleDateFormat を使い遅いため、java.time で組み立てる。
+     * 範囲外・不正な値は Timestamps.toString に任せる(同じ例外になる)。
+     */
+    static String formatTimestamp(Timestamp t) {
+        long seconds = t.getSeconds();
+        int nanos = t.getNanos();
+        if (seconds < MIN_TIMESTAMP_SECONDS || seconds > MAX_TIMESTAMP_SECONDS || nanos < 0 || nanos > 999_999_999) {
+            return Timestamps.toString(t);
+        }
+        LocalDateTime dt = LocalDateTime.ofEpochSecond(seconds, 0, ZoneOffset.UTC);
+        StringBuilder sb = new StringBuilder(30);
+        pad(sb, dt.getYear(), 4).append('-');
+        pad(sb, dt.getMonthValue(), 2).append('-');
+        pad(sb, dt.getDayOfMonth(), 2).append('T');
+        pad(sb, dt.getHour(), 2).append(':');
+        pad(sb, dt.getMinute(), 2).append(':');
+        pad(sb, dt.getSecond(), 2);
+        if (nanos != 0) {
+            sb.append('.');
+            if (nanos % 1_000_000 == 0) {
+                pad(sb, nanos / 1_000_000, 3);
+            } else if (nanos % 1_000 == 0) {
+                pad(sb, nanos / 1_000, 6);
+            } else {
+                pad(sb, nanos, 9);
+            }
+        }
+        return sb.append('Z').toString();
+    }
+
+    private static StringBuilder pad(StringBuilder sb, int value, int width) {
+        String digits = Integer.toString(value);
+        for (int i = digits.length(); i < width; i++) {
+            sb.append('0');
+        }
+        return sb.append(digits);
     }
 
     /** WKT は JsonFormat に任せ、その断片をトークンとしてコピーする(エスケープ規則を Jackson に揃えるため)。 */

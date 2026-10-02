@@ -1,0 +1,87 @@
+// テスト専用: 本番想定の「より複雑な proto」を模した性能・一致検証用メッセージ。
+// 1 ログが大きく、Event の oneof の種類が多く、ネスト・repeated・double・bytes・enum・WKT を含む。
+syntax = "proto3";
+package complextest;
+option java_multiple_files = true;
+option java_package = "demo.proto.complextest";
+
+import "google/protobuf/timestamp.proto";
+
+message ComplexSimLog {
+  int64 job_id = 1;
+  string job_name = 2;
+  repeated ComplexObjectLog logs = 3;
+}
+
+message ComplexObjectLog {
+  int64 timestamp = 1;
+  int64 object_id = 2;
+  string object_name = 3;
+  Header header = 4;
+  repeated Attr attrs = 5;
+  repeated ComplexEvent events = 6;
+}
+
+message Header {
+  int64 seq = 1;
+  string host = 2;
+  repeated int64 tags = 3;
+  Position pos = 4;
+  Status status = 5;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_RUNNING = 1;
+  STATUS_STOPPED = 2;
+  STATUS_FAILED = 3;
+}
+
+message Position {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  int64 frame = 4;
+}
+
+message Attr {
+  string key = 1;
+  string value = 2;
+  int64 num = 3;
+}
+
+message ComplexEvent {
+  int64 event_id = 1;
+  int64 event_type = 2;
+  google.protobuf.Timestamp at = 3;   // WKT(データ生成時に設定する/しないを切り替える)
+  oneof payload {
+    CommEvent2 comm = 10;
+    ExecEvent2 exec = 11;
+    MoveEvent move = 12;
+    StateEvent state = 13;
+    ErrorEvent error = 14;
+    MetricEvent metric = 15;
+    BlobEvent blob = 16;
+    NestedEvent nested = 17;
+    AlarmEvent alarm = 18;
+    RouteEvent route = 19;
+    QueueEvent queue = 20;
+    NoteEvent note = 21;
+  }
+}
+
+message CommEvent2 { int64 from_id = 1; int64 to_id = 2; string body = 3; int32 channel = 4; }
+message ExecEvent2 { int64 exec_id = 1; string command = 2; string result = 3; int64 elapsed_ns = 4; }
+message MoveEvent { Position from = 1; Position to = 2; int64 duration_ms = 3; double speed = 4; }
+message StateEvent { Status before = 1; Status after = 2; repeated int64 related_ids = 3; string reason = 4; }
+message ErrorEvent { int32 code = 1; string message = 2; repeated string stack = 3; int64 thread_id = 4; }
+message MetricEvent { string name = 1; repeated double values = 2; int64 count = 3; double avg = 4; }
+message BlobEvent { bytes data = 1; string mime = 2; int64 size = 3; }
+message NestedEvent { Level1 l1 = 1; }
+message Level1 { int64 id = 1; Level2 l2 = 2; repeated Attr attrs = 3; }
+message Level2 { int64 id = 1; Level3 l3 = 2; }
+message Level3 { int64 id = 1; string leaf = 2; repeated int64 values = 3; }
+message AlarmEvent { int64 alarm_id = 1; int32 severity = 2; string text = 3; bool acked = 4; }
+message RouteEvent { repeated Position waypoints = 1; int64 route_id = 2; }
+message QueueEvent { string queue = 1; int64 depth = 2; int64 enqueued = 3; int64 dequeued = 4; }
+message NoteEvent { string author = 1; string text = 2; }

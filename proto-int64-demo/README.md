@@ -22,6 +22,8 @@ proto-int64-demo/
     src/main/java/demo/app/Benchmark.java             性能の簡易計測
     src/test/java/demo/json/*Test.java                JUnit 5 テスト
     src/test/proto/order_test.proto                   テスト専用 proto(宣言順≠番号順のキー順確認用)
+    src/test/proto/complex_test.proto                 テスト専用 proto(oneof 12 種・深いネスト等の「複雑な proto」想定)
+    src/test/java/demo/json/ComplexBenchmark.java     複雑な proto での性能比較(test スコープで実行)
 ```
 
 ## 前提ツール(検証した環境)
@@ -135,9 +137,9 @@ Well-Known Types(`Int64Value` 等のラッパー型、`Any`、`Timestamp` など
 
 ## テスト結果
 
-`mvn clean test`(Go サーバ起動中): **86 件すべて成功**(Tests run: 86, Failures: 0, Errors: 0, Skipped: 0)。
-内訳は基準実装のテスト 30 件 + 改善案 A/B の一致テスト 56 件(下記「性能改善」節)。
-サーバ停止中に実行すると統合テスト 5 件はスキップされ、残り 81 件が成功(Skipped: 5)することも確認。
+`mvn clean test`(Go サーバ起動中): **92 件すべて成功**(Tests run: 92, Failures: 0, Errors: 0, Skipped: 0)。
+内訳は基準実装のテスト 30 件 + 改善案 A/B の一致テスト 58 件(下記「性能改善」節)+ 複雑な proto の一致テスト 2 件 + Timestamp 書式テスト 2 件。
+サーバ停止中に実行すると統合テスト 5 件はスキップされ、残り 87 件が成功(Skipped: 5)することも確認。
 Go 側 `go test ./...`: 2 件成功。
 
 | 結果 | テストクラス / グループ | テスト | 内容 |
@@ -284,11 +286,85 @@ simlog.proto は宣言順 = 番号順なので表に出なかったが、実験�
 | JsonFormat との互換性 | JsonFormat の出力を加工するだけ | 同左 | **JsonFormat の出力規則を自前で再現**(上記テストで一致を確認した範囲のみ保証) |
 | Printer オプション | すべて可 | すべて可 | **不可**(既定の出力のみ) |
 | map | 文字列のまま出力 | 文字列のまま出力 | **未対応(例外)** |
+| WKT | JsonFormat の表現 | 同左 | Timestamp / Duration / ラッパー型は直接書く(JsonFormat と一致をテスト済み)、他は JsonFormat 経由 |
 | protobuf-java の更新時 | 影響小 | 影響小 | JsonFormat の出力規則が変わると差分が出る可能性 → 一致テストで検知する運用が必要 |
 
 - 性能を重視するなら **B**。ただし B は JsonFormat を再実装しているので、protobuf-java を更新するたびに一致テスト(`AlternativeConvertersTest`)を回すことが前提。
   map や Printer オプションが必要になったら B に追加実装が要る。
 - 仕様の安全性を重視し、性能要件がそれほど厳しくないなら **Tree か A**。A は Tree の完全な置き換えとして使え(全テストで一致)、少しだけ速くメモリも少ない。
+
+## 複雑な proto での検証(oneof の種類が多い・1 ログが大きい場合)
+
+「本番の proto はもっと複雑になり、1 ログが大きく、Event の oneof の種類も多い」場合でも B が有利かを、
+テスト専用 proto `src/test/proto/complex_test.proto` で検証しました(共有の simlog.proto は変更していません)。
+
+**想定した構造**: Event の oneof 12 種(+未設定)、4 階層のネスト、repeated message / repeated int64 / repeated double / repeated string、
+double・bytes・enum・bool、長めの文字列(日本語・改行・記号)、各 Event に `google.protobuf.Timestamp`(あり / なしの 2 シナリオ)。
+データは `ComplexData` で決定的に生成し、gRPC を介さず Java 内で変換時間を測りました(`ComplexBenchmark`)。
+
+### 事前の見立て
+
+- JsonFormat 自体もリフレクション(`getAllFields` / `getField`)で動いており、B は「その走査 + Jackson への書き出し」だけをする。
+  Tree / A は「JsonFormat の全処理 + 追加の処理」なので、構造が複雑になっても **B が JsonFormat より遅くなる理由は基本的に無い**。
+- ただし B の弱点として、(1) WKT は値ごとに JsonFormat を呼んで再パースしていた、(2) oneof の候補が多いと全候補に `hasField` を呼ぶ、の 2 点を予想した。
+
+### 最初の計測で見つかった問題と B の改善
+
+200 ログ × 250 Event(Event 5 万件、protobuf 約 5.8〜6.4MB、1 ログ約 30KB)、P1 最小 [ms]:
+
+| B の版 | Timestamp なし | Timestamp あり | 備考 |
+|---|---:|---:|---|
+| (参考)素の JsonFormat | 130 | 232 | |
+| B 改善前 | 107 | **229** | Timestamp ありで素の JsonFormat と同等まで悪化 |
+| + oneof は設定済みメンバーを 1 回だけ調べる | 95 | 195 | `getOneofFieldDescriptor` を使い、他の候補の `hasField` を省略 |
+| + Timestamp / Duration / ラッパー型を直接書く | 97 | 179 | JsonFormat 呼び出しと再パースを省略。効果は小さい |
+| + Timestamp の書式を java.time で自前実装 | 94 | **109** | `Timestamps.toString` 自体(内部で SimpleDateFormat)が 1 件約 1.6µs と遅かった |
+
+- Timestamp の自前書式は `Timestamps.toString`(JsonFormat が内部で使う関数)と、0001〜9999 年の 20 万件(シード固定)+ 境界値(閏日・1582 年のグレゴリオ暦切替前後・最小/最大)で
+  完全一致すること、範囲外で同じ例外になることを `TimestampFormatTest` で確認した。
+- WKT 単体(Timestamp のナノ秒 0/3/6/9 桁、Duration の負数、全ラッパー型の NaN / ±Infinity / -0.0 / 最大最小値、Builder)でも基準実装との一致をテストで確認した。
+
+### 最終結果(3 回実行、最小 [ms]、割り当て [MB/回])
+
+200 ログ × 250 Event:
+
+| ケース | Timestamp なし 最小 | 割り当て | Timestamp あり 最小 | 割り当て |
+|---|---|---:|---|---:|
+| P1 素の JsonFormat のみ | 130 / 131 / 127 | 235–249 | 224 / 230 / 223 | 335–354 |
+| P1 Tree(基準) | 263 / 266 / 272 | 416–431 | 371 / 391 / 370 | 536–554 |
+| P1 A: Streaming | 239 / 223 / 235 | 319–333 | 358 / 367 / 364 | 430–447 |
+| P1 **B: Direct** | **93 / 94 / 90** | **120** | **115 / 113 / 111** | **144–148** |
+| P3 素の JsonFormat のみ | 143 / 139 / 144 | 292–306 | 245 / 242 / 236 | 406–424 |
+| P3 Tree(基準) | 282 / 287 / 287 | 428–442 | 396 / 406 / 391 | 554–572 |
+| P3 A: Streaming | 237 / 242 / 237 | 314–329 | 349 / 351 / 342 | 461–478 |
+| P3 **B: Direct** | **91 / 88 / 91** | **96** | **109 / 104 / 109** | **120–124** |
+
+出力サイズ: Timestamp なし 10,126,942 bytes、あり 11,876,592 bytes(P1)。計測前に 3 方式の出力一致を毎回確認している。
+
+1 ログを 10 倍に大きくした場合(20 ログ × 2,500 Event、1 ログ約 285〜315KB、総 Event 数は同じ)、1 回実行の最小 [ms]:
+
+| ケース | Timestamp なし | Timestamp あり |
+|---|---:|---:|
+| P1 素の JsonFormat / Tree / A / **B** | 127 / 265 / 230 / **93** | 225 / 380 / 353 / **111** |
+| P3 素の JsonFormat / Tree / A / **B** | 137 / 274 / 223 / **89** | 241 / 386 / 363 / **103** |
+
+### 結論
+
+- **複雑な proto でも B が最速**。Tree の約 1/3(Timestamp ありで約 1/3.3)、素の JsonFormat と比べても約 1.4 倍(Timestamp ありで約 2 倍)速く、割り当ても約 1/3.5。
+- oneof の種類が増えても、改善後の B は設定されているメンバーだけを処理するので影響は小さい(未設定の候補は oneof ごとに 1 回の確認で済む)。
+- 1 ログのサイズは性能にほぼ影響しない。どの方式もコストは**総データ量に比例**する(P1 / P3、200×250 / 20×2500 で同程度)。
+- 素の JsonFormat に対する B の優位は、simlog(約 1.8 倍)より複雑な proto(約 1.4 倍)の方が小さい。double や bytes、長い文字列など
+  「どの方式でもかかる処理」の比率が増えるため。それでも Tree / A に対しては約 2.5〜3.4 倍の差が保たれる。
+- 元の simlog(1000×50、Go サーバ経由)でも退行なし(B の P1 最小 31 → 28.6ms)。
+
+### 注意点(複雑な proto で B を使う場合)
+
+- **map と group は未対応**(例外)。本番 proto に map があるなら B に実装を追加する必要がある。
+- `Any` / `Struct` / `Value` / `ListValue` / `FieldMask` / `Empty` は引き続き JsonFormat 経由(低速パス)。これらを多用する場合は B の優位が縮む(未計測)。
+  `Any` は JsonFormat と同じく TypeRegistry が無いと出力できない。
+- Timestamp の書式を自前実装したため、JsonFormat 内部の書式が将来変わると差が出る可能性がある。`TimestampFormatTest` と一致テストで検知する前提。
+- 生成コード以外(DynamicMessage や Builder)の Timestamp / Duration / ラッパー型は高速パスに入らず JsonFormat 経由になる(結果は同じ)。
+- 実際の本番 proto・データ分布では計測していない。最終判断の前に、本番 proto をこのテスト・ベンチマークの形に当てはめて確認することを推奨。
 
 ## 仕様判断(実際の出力に基づく)
 
@@ -330,7 +406,8 @@ OpenAPI 側で 0 のフィールドが `required` になっている場合は、
 - Go サーバのビルド・起動(`:50051`、起動ログ出力)・`go test`(2 件成功)
 - Java のビルド(protoc 4.36.2 / protoc-gen-grpc-java 1.84.0 によるコード生成を含む)
 - Java クライアントから Go サーバへの GetSimLog / StreamObjectLogs 呼び出しと、3 パターンの JSON / NDJSON 出力
-- JUnit 5 テスト 86 件すべて成功(サーバ起動時)。サーバ停止時は統合テスト 5 件がスキップされ 81 件成功
+- JUnit 5 テスト 92 件すべて成功(サーバ起動時)。サーバ停止時は統合テスト 5 件がスキップされ 87 件成功
+- 複雑な proto(oneof 12 種・深いネスト・Timestamp 等)でも 3 方式の出力が一致し、B の優位が保たれること(下記「複雑な proto での検証」節)
 - テストが誤実装を検出できること(基準実装 2 種、改善案 A/B 5 種のミューテーションすべて検出)
 - 改善案 A(Streaming)・B(Direct)の出力が基準実装と文字列として一致すること(上記の範囲のデータで)と、その性能・割り当て量の計測(3 回)
 - 1000×50(Event 5 万件)での変換時間・出力サイズの計測(3 回)と、サイズ差の内訳

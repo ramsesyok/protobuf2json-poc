@@ -1,6 +1,18 @@
 package demo.json;
 
+import com.google.protobuf.BoolValue;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.BytesValue;
+import com.google.protobuf.DoubleValue;
+import com.google.protobuf.Duration;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.FloatValue;
+import com.google.protobuf.Int32Value;
+import com.google.protobuf.Int64Value;
+import com.google.protobuf.StringValue;
+import com.google.protobuf.Timestamp;
+import com.google.protobuf.UInt32Value;
+import com.google.protobuf.UInt64Value;
 import com.google.protobuf.MessageOrBuilder;
 import com.google.protobuf.util.JsonFormat;
 import demo.proto.CommEvent;
@@ -143,6 +155,42 @@ class AlternativeConvertersTest {
         DynamicMessage dynamic = DynamicMessage.parseFrom(OutOfOrder.getDescriptor(), generated.toByteString());
         assertEquals(expected, REFERENCE.toJson(dynamic));
         assertEquals(expected, impl.toJson().apply(dynamic));
+    }
+
+    static List<MessageOrBuilder> wellKnownTypes() {
+        return List.of(
+                Timestamp.getDefaultInstance(),
+                Timestamp.newBuilder().setSeconds(1700000000L).build(),
+                Timestamp.newBuilder().setSeconds(1700000000L).setNanos(123000000).build(),
+                Timestamp.newBuilder().setSeconds(1700000000L).setNanos(123456000).build(),
+                Timestamp.newBuilder().setSeconds(1700000000L).setNanos(123456789).build(),
+                Timestamp.newBuilder().setSeconds(-62135596800L).build(), // 0001-01-01T00:00:00Z
+                Timestamp.newBuilder().setSeconds(-1L).setNanos(999999999).build(),
+                Timestamp.newBuilder().setSeconds(253402300799L).setNanos(999999999).build(), // 9999-12-31
+                Duration.getDefaultInstance(),
+                Duration.newBuilder().setSeconds(3).setNanos(500000000).build(),
+                Duration.newBuilder().setSeconds(-3).setNanos(-1).build(),
+                Duration.newBuilder().setSeconds(315576000000L).build(),
+                Int64Value.of(Long.MIN_VALUE), Int64Value.of(0), Int64Value.of(9007199254740993L),
+                UInt64Value.of(-1L), UInt64Value.of(5),
+                Int32Value.of(Integer.MIN_VALUE), Int32Value.of(0),
+                UInt32Value.of(-1), UInt32Value.of(7),
+                BoolValue.of(true), BoolValue.of(false),
+                StringValue.of("<tag> & \"q\" 日本\n"), StringValue.of(""),
+                BytesValue.of(ByteString.copyFrom(new byte[]{(byte) 0xfb, (byte) 0xff, 0x00})), BytesValue.of(ByteString.EMPTY),
+                FloatValue.of(Float.NaN), FloatValue.of(0.1f), FloatValue.of(Float.NEGATIVE_INFINITY), FloatValue.of(-0.0f),
+                DoubleValue.of(Double.POSITIVE_INFINITY), DoubleValue.of(1e21), DoubleValue.of(-0.0), DoubleValue.of(5e-324),
+                Timestamp.newBuilder().setSeconds(1700000000L).setNanos(5), // Builder
+                Duration.newBuilder().setSeconds(1)); // Builder → 高速パス対象外(JsonFormat 経由)
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("impls")
+    @DisplayName("Well-Known Types(Timestamp / Duration / 全ラッパー型)単体で基準実装と一致")
+    void wellKnownTypesSameAsReference(Impl impl) {
+        for (MessageOrBuilder m : wellKnownTypes()) {
+            assertEquals(REFERENCE.toJson(m), impl.toJson().apply(m), () -> REFERENCE.toRawJson(m));
+        }
     }
 
     @Test
