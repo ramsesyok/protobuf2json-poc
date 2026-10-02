@@ -1,0 +1,30 @@
+// proto2 の未対応構造(group / extension)の確認用(テスト専用)。
+syntax = "proto2";
+
+package protojson.test2;
+
+option java_multiple_files = true;
+option java_package = "io.github.ramsesyok.protojson.testproto2";
+
+message WithGroup {
+  optional int64 id = 1;
+  optional group Item = 2 {
+    optional int64 value = 3;
+  }
+}
+
+message Extendable {
+  optional int64 id = 1;
+  extensions 100 to 199;
+}
+
+extend Extendable {
+  optional int64 ext_value = 100;
+}
+
+// proto2 の optional スカラー(presence あり)と required
+message Proto2Plain {
+  required int64 id = 1;
+  optional int64 count = 2 [default = 5];
+  optional string name = 3;
+}

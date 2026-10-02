@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  protobuf-int64-json: Protobuf メッセージを JSON に変換するライブラリ。
+  int64 / sint64 / sfixed64 を(Protobuf 標準 JSON の文字列ではなく)JSON の数値で出力する。
+
+  実行時の依存は protobuf-java / protobuf-java-util / jackson-core のみ。
+  gRPC と jackson-databind はテスト(gRPC 経由の動作テスト・検証用のパース)でのみ使う。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.ramsesyok</groupId>
+  <artifactId>protobuf-int64-json</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+  <name>protobuf-int64-json</name>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <protobuf.version>4.36.2</protobuf.version>
+    <jackson.version>2.22.3</jackson.version>
+    <!-- 以下はテスト専用 -->
+    <grpc.version>1.84.0</grpc.version>
+    <junit.version>5.14.4</junit.version>
+    <!-- 動作テスト(gRPC 統合テスト)の接続先。サーバ未起動ならそのテストはスキップされる -->
+    <grpc.target>localhost:50051</grpc.target>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- grpc-protobuf(テスト用)が protobuf-java 3.25.x に依存しているため、4.x に揃える -->
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>${protobuf.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java-util</artifactId>
+        <version>${protobuf.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- ===== 実行時に必要な依存 ===== -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+    </dependency>
+    <dependency>
+      <!-- JsonFormat(Any / Struct 等の WKT の出力)、Timestamps / Durations -->
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java-util</artifactId>
+    </dependency>
+    <dependency>
+      <!-- JsonGenerator / JsonParser のみ使う(databind は不要)。
+           2.18.0 以上が必要(JsonWriteFeature.COMBINE_UNICODE_SURROGATES_IN_UTF8 を使うため) -->
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+
+    <!-- ===== テスト専用 ===== -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-netty-shaded</artifactId>
+      <version>${grpc.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-protobuf</artifactId>
+      <version>${grpc.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-stub</artifactId>
+      <version>${grpc.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <!-- gRPC 生成コードの @Generated 用 -->
+      <groupId>org.apache.tomcat</groupId>
+      <artifactId>annotations-api</artifactId>
+      <version>6.0.53</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <extensions>
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>1.7.1</version>
+      </extension>
+    </extensions>
+    <plugins>
+      <plugin>
+        <!--
+          テスト用の proto からコードを生成する(本体には proto は無い)。
+          protoc / protoc-gen-grpc-java は Maven Central から自動取得される。
+            - src/test/proto/*.proto : 単体テスト用メッセージ
+            - ../proto/simlog.proto   : Go サーバとの動作テスト用(gRPC スタブも生成)
+        -->
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+          <pluginId>grpc-java</pluginId>
+          <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <id>test-messages</id>
+            <goals>
+              <goal>test-compile</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>simlog-messages</id>
+            <goals>
+              <goal>test-compile</goal>
+            </goals>
+            <configuration>
+              <protoTestSourceRoot>${project.basedir}/../proto</protoTestSourceRoot>
+              <outputDirectory>${project.build.directory}/generated-test-sources/protobuf/simlog-java</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
+            <id>simlog-grpc</id>
+            <goals>
+              <goal>test-compile-custom</goal>
+            </goals>
+            <configuration>
+              <protoTestSourceRoot>${project.basedir}/../proto</protoTestSourceRoot>
+              <outputDirectory>${project.build.directory}/generated-test-sources/protobuf/simlog-grpc</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.15.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.6</version>
+        <configuration>
+          <systemPropertyVariables>
+            <grpc.target>${grpc.target}</grpc.target>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <!-- 簡易ベンチマーク(PrinterBenchmark)の実行用 -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
