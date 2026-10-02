@@ -15,10 +15,13 @@ proto-int64-demo/
     data_test.go            データ生成のテスト
     gen.sh                  protoc で Go コードを生成(生成済みの proto/*.pb.go はコミット済み)
   client-java/              gRPC クライアント + JSON 変換 + テスト(Maven)
-    src/main/java/demo/json/Int64JsonConverter.java   変換器本体
+    src/main/java/demo/json/Int64JsonConverter.java   変換器本体(JsonNode ツリー方式、基準実装)
+    src/main/java/demo/json/StreamingInt64JsonConverter.java  改善案A: ストリーミング(Parser→Generator)
+    src/main/java/demo/json/DirectInt64JsonWriter.java        改善案B: JsonFormat を使わない 1 パス
     src/main/java/demo/app/SimClient.java             3 パターンの JSON をファイル出力
     src/main/java/demo/app/Benchmark.java             性能の簡易計測
     src/test/java/demo/json/*Test.java                JUnit 5 テスト
+    src/test/proto/order_test.proto                   テスト専用 proto(宣言順≠番号順のキー順確認用)
 ```
 
 ## 前提ツール(検証した環境)
@@ -132,8 +135,9 @@ Well-Known Types(`Int64Value` 等のラッパー型、`Any`、`Timestamp` など
 
 ## テスト結果
 
-`mvn clean test`(Go サーバ起動中): **30 件すべて成功**(Tests run: 30, Failures: 0, Errors: 0, Skipped: 0)。
-サーバ停止中に実行すると統合テスト 4 件はスキップされ、残り 26 件が成功(Skipped: 4)することも確認。
+`mvn clean test`(Go サーバ起動中): **86 件すべて成功**(Tests run: 86, Failures: 0, Errors: 0, Skipped: 0)。
+内訳は基準実装のテスト 30 件 + 改善案 A/B の一致テスト 56 件(下記「性能改善」節)。
+サーバ停止中に実行すると統合テスト 5 件はスキップされ、残り 81 件が成功(Skipped: 5)することも確認。
 Go 側 `go test ./...`: 2 件成功。
 
 | 結果 | テストクラス / グループ | テスト | 内容 |
@@ -159,12 +163,15 @@ Go 側 `go test ./...`: 2 件成功。
 | PASS | Go サーバとの統合テスト | pattern1 | 12×9 件、全 int64 数値・素の出力との差分 int64 のみ・0 値キー無し・round trip |
 | PASS | Go サーバとの統合テスト | pattern2 | `result.exitCode = MinInt64`(数値)、`result.output` は文字列 |
 | PASS | Go サーバとの統合テスト | pattern3 | streaming 12 件 → 12 行、各行パース可、`a\nb` を含む、unary の logs から作った NDJSON と一致 |
+| PASS | Go サーバとの統合テスト | alternativesMatchReference | 改善案 A/B の出力がサーバ由来データ(パターン1〜3)で基準実装と文字列一致 |
+| PASS | AlternativeConvertersTest ×55 | (下記「性能改善」節) | 改善案 A/B と基準実装の文字列一致 |
 | PASS | Go サーバとの統合テスト | specialStrings | 数字のみ・改行・ダブルクォート・日本語・`<>&='` の文字列が保持される |
 
 **テスト自体の検出力の確認**(ミューテーション): 変換器を一時的に壊して実行し、元に戻した。
 
 - 子 message(oneof 内の `commEvent` / `execEvent`、`result`)に再帰しないようにする → 30 件中 13 件失敗
 - 「数字だけの string も数値化する」素朴な実装を混ぜる → 30 件中 13 件失敗
+- 改善案 A/B についても 5 種のミューテーションを行い、すべて検出された(「性能改善」節)
 
 **開発中に検出して修正した不具合**(いずれもテストで発見):
 
@@ -186,7 +193,7 @@ gRPC で 1 回受信したメッセージをメモリ上で変換(通信時間�
 | P3 素の JsonFormat のみ(1000 行) | 59.9 / 62.1 / 63.5 | 55.7 / 58.1 / 60.6 | 4,820,490 |
 | P3 Int64JsonConverter(2パス、1000 行) | 113.1 / 109.4 / 123.8 | 106.0 / 105.8 / 111.2 | 4,372,478 |
 
-P1 の内訳(各段階を単独計測、run1 / run2 / run3 の平均 [ms]):
+P1 の内訳(各段階を単独計測、run1 / run2 / run3 の平均 [ms]。初版の Benchmark(コミット 8f9927f)で計測。現行版は下記「性能改善」節の比較表を出力する):
 
 | 段階 | 平均 [ms] |
 |---|---|
@@ -202,6 +209,86 @@ P1 の内訳(各段階を単独計測、run1 / run2 / run3 の平均 [ms]):
 - 平均が最小より大きく振れる回(run3 の P1 180ms 等)があり、GC の影響と推測(GC ログは未取得)。
 - 出力サイズは変換後のほうが 448,014 bytes 小さい。内訳は **int64 の引用符 2 bytes × 140,667 個 = 281,334** と、
   **`<` 等のエスケープが生文字になった分 5 bytes × 33,336 個 = 166,680** で、差分と完全に一致することを確認した。
+
+## 性能改善: ストリーミング変換の比較
+
+上記の 2 パス(JsonNode ツリー)方式に対し、2 つの改善案を実装して比較しました。
+
+| 方式 | クラス | 仕組み |
+|---|---|---|
+| Tree(基準) | `Int64JsonConverter` | JsonFormat → Jackson で JsonNode ツリー化 → Descriptor で走査・置換 → 文字列化 |
+| **A: Streaming** | `StreamingInt64JsonConverter` | JsonFormat の出力を `JsonParser` でトークン単位に読み、Descriptor を追いながら `JsonGenerator` にコピー。int64 の文字列トークンだけ数値で書く。ツリーを作らない |
+| **B: Direct** | `DirectInt64JsonWriter` | JsonFormat を使わず、Protobuf のリフレクション API(`hasField` / `getField` 等)から `JsonGenerator` に直接書く 1 パス。int64 は最初から数値 |
+
+### 正しさ(A・B とも基準実装と文字列として完全一致)
+
+`AlternativeConvertersTest`(55 件)と統合テスト `alternativesMatchReference`(1 件)で、A・B の出力が基準実装と**バイト単位で一致**することを確認しました。
+
+- simlog.proto のメッセージ 22 種(境界値・0・デフォルト値・未設定 oneof / optional・デフォルト値で設定した optional・制御文字や `\u2028` を含む文字列・Builder)
+- NDJSON(`toNdjson` / `writeNdjson` / 0 件)
+- DynamicMessage: bool / bytes / enum(repeated 含む)/ uint32 / fixed32 / float / double(NaN・±Infinity・-0.0・1e21 等)/ Timestamp / StringValue / repeated int64 / sint64 / sfixed64 / uint64 / fixed64 / Int64Value
+- 宣言順とフィールド番号順が異なるメッセージ(テスト専用 proto の生成コードと DynamicMessage の両方)
+- Go サーバ由来データ(12×9、パターン1〜3)
+- A のみ: map を含むメッセージ、`preservingProtoFieldNames()` / `alwaysPrintFieldsWithNoPresence()` / 整形あり Printer
+- B のみ: map を含むと `UnsupportedOperationException`(未対応であることの確認)
+- ベンチマーク自体も、計測前に 1000×50 のデータで 3 方式の出力一致を確認してから計測している
+
+ミューテーション(壊して実行 → 元に戻す)の検出結果:
+
+| 壊し方 | 失敗件数 / 84 件(当時) |
+|---|---:|
+| B: uint32 を符号付きで出力 | 1 |
+| B: デフォルト値を省略しない | 25 |
+| A: repeated message の中に再帰しない | 10 |
+| A: int64 を文字列のまま出力 | 23 |
+| B: キー順を宣言順にする(下記の不具合の再現) | 1 / 86 件 |
+
+**開発中に検出して修正した不具合**: B は当初 Descriptor の**宣言順**でキーを出力していたが、JsonFormat は**フィールド番号順**で出力する。
+simlog.proto は宣言順 = 番号順なので表に出なかったが、実験で不一致を確認(`{"z":5,"a":1}` vs `{"a":1,"z":5}`)し、番号順に修正。
+回帰防止にテスト専用 proto(`src/test/proto/order_test.proto`)を追加した。
+
+### 計測結果
+
+前節と同じ条件(1000×50、Event 5 万件、ウォームアップ 20 回後 30 回、Java 21、4 vCPU、最大ヒープ 3,422MB)。
+各ケースの前に `System.gc()` を呼んでいる。割り当て量は計測スレッドの総割り当てバイト数(`ThreadMXBean.getCurrentThreadAllocatedBytes`)÷ 回数で、GC で回収された分も含む。
+3 回実行した結果(run1 / run2 / run3):
+
+| ケース | 平均 [ms] | 最小 [ms] | 割り当て [MB/回] | 出力サイズ [bytes] |
+|---|---|---|---|---:|
+| P1 素の JsonFormat のみ(int64 は文字列) | 65.6 / 76.5 / 62.6 | 58.0 / 58.9 / 57.1 | 120 / 136 / 133 | 4,820,527 |
+| P1 Tree(基準) | 146.5 / 130.3 / 122.8 | 111.3 / 117.6 / 114.6 | 200 / 217 / 213 | 4,372,513 |
+| P1 **A: Streaming** | 108.6 / 117.8 / 103.2 | 98.8 / 98.4 / 94.2 | 150 / 167 / 163 | 4,372,513 |
+| P1 **B: Direct** | **37.1 / 37.1 / 33.7** | **31.8 / 32.2 / 30.8** | **38 / 42 / 38** | 4,372,513 |
+| P3 素の JsonFormat のみ(int64 は文字列) | 71.3 / 71.6 / 69.5 | 61.6 / 63.1 / 62.6 | 146 / 162 / 159 | 4,820,490 |
+| P3 Tree(基準) | 123.2 / 126.2 / 129.9 | 114.8 / 116.4 / 117.4 | 221 / 239 / 235 | 4,372,478 |
+| P3 **A: Streaming** | 111.4 / 108.7 / 108.5 | 98.8 / 101.6 / 98.8 | 167 / 184 / 180 | 4,372,478 |
+| P3 **B: Direct** | **36.1 / 35.7 / 33.3** | **31.1 / 31.7 / 31.4** | **38 / 42 / 38** | 4,372,478 |
+
+(B の修正前、宣言順で出力していた版でも 3 回計測しており、P1 平均 44.4 / 33.5 / 40.2ms でほぼ同等だった)
+
+### 所見
+
+- **A: Streaming** は Tree より **約 13〜17% 速く**(最小値で 111–118 → 94–99ms)、割り当ても **約 25% 減**(約 210 → 160MB/回)。
+  ただし素の JsonFormat(約 57ms)を必ず 1 回通すため、その **約 1.7 倍**が下限で、大きな改善にはならない。
+  時間の大半は `JsonFormat.print` 自体(前節の内訳で約 55ms)。
+- **B: Direct** は Tree の **約 1/3.5 の時間**(最小値で 約 31ms)、割り当ては **約 1/5**(約 40MB/回)。
+  **int64 を文字列で出す素の JsonFormat よりも約 1.8 倍速い**。JsonFormat の文字列組み立てとエスケープ処理を通らないことが効いていると考えられる(プロファイラでの確認はしていない)。
+- P1(1 JSON)と P3(1000 行)で、どの方式も総コストはほぼ同じ。
+
+### トレードオフと推奨
+
+| | Tree(基準) | A: Streaming | B: Direct |
+|---|---|---|---|
+| 速度(P1 最小) | 約 115ms | 約 97ms | **約 31ms** |
+| 割り当て | 約 210MB/回 | 約 160MB/回 | **約 40MB/回** |
+| JsonFormat との互換性 | JsonFormat の出力を加工するだけ | 同左 | **JsonFormat の出力規則を自前で再現**(上記テストで一致を確認した範囲のみ保証) |
+| Printer オプション | すべて可 | すべて可 | **不可**(既定の出力のみ) |
+| map | 文字列のまま出力 | 文字列のまま出力 | **未対応(例外)** |
+| protobuf-java の更新時 | 影響小 | 影響小 | JsonFormat の出力規則が変わると差分が出る可能性 → 一致テストで検知する運用が必要 |
+
+- 性能を重視するなら **B**。ただし B は JsonFormat を再実装しているので、protobuf-java を更新するたびに一致テスト(`AlternativeConvertersTest`)を回すことが前提。
+  map や Printer オプションが必要になったら B に追加実装が要る。
+- 仕様の安全性を重視し、性能要件がそれほど厳しくないなら **Tree か A**。A は Tree の完全な置き換えとして使え(全テストで一致)、少しだけ速くメモリも少ない。
 
 ## 仕様判断(実際の出力に基づく)
 
@@ -227,9 +314,8 @@ OpenAPI 側で 0 のフィールドが `required` になっている場合は、
 3. **Jackson のノード型**: 変換器が作るノードは `LongNode` だが、出力を再パースすると Jackson は int に収まる値を `IntNode` にする
    (`isLong()` は false、`isIntegralNumber()` / `canConvertToLong()` は true)。また `LongNode(1).equals(IntNode(1))` は false。
    テストは `isIntegralNumber()` + `longValue()` で判定している。
-4. **性能**: 2 パスのため素の JsonFormat の約 2 倍の時間、かつ全体の JsonNode ツリーをメモリに持つ。
-   改善案(未実装・未検証): Jackson のストリーミング API(`JsonParser` → `JsonGenerator`)で Descriptor を追いながら変換してツリーを作らない、
-   または Descriptor を使って直接 JSON を書く自前 Printer。
+4. **性能**: 基準実装(Tree)は 2 パスのため素の JsonFormat の約 2 倍の時間、かつ全体の JsonNode ツリーをメモリに持つ。
+   改善案 A(ストリーミング)は約 13〜17% の改善にとどまり、B(1 パス)は約 3.5 倍速いが JsonFormat の再実装になる(「性能改善」節)。
 5. **対象外の型**: uint64 / fixed64、Well-Known Types(`Int64Value`、`Any`、`Timestamp` 等)、map は文字列のまま(DynamicMessage のテストで挙動を確認)。
    特に `Any` の中身(packed message)の int64 は数値化されない。必要なら TypeRegistry を使って型を解決する拡張が要る。
 6. **proto の変更への追従**: 変換は Descriptor ベースなので、フィールド追加には自動で追従する。ただし今回のテストのキー名リスト
@@ -244,8 +330,9 @@ OpenAPI 側で 0 のフィールドが `required` になっている場合は、
 - Go サーバのビルド・起動(`:50051`、起動ログ出力)・`go test`(2 件成功)
 - Java のビルド(protoc 4.36.2 / protoc-gen-grpc-java 1.84.0 によるコード生成を含む)
 - Java クライアントから Go サーバへの GetSimLog / StreamObjectLogs 呼び出しと、3 パターンの JSON / NDJSON 出力
-- JUnit 5 テスト 30 件すべて成功(サーバ起動時)。サーバ停止時は統合テスト 4 件がスキップされ 26 件成功
-- テストが誤実装を検出できること(ミューテーション 2 種でそれぞれ 13 件失敗)
+- JUnit 5 テスト 86 件すべて成功(サーバ起動時)。サーバ停止時は統合テスト 5 件がスキップされ 81 件成功
+- テストが誤実装を検出できること(基準実装 2 種、改善案 A/B 5 種のミューテーションすべて検出)
+- 改善案 A(Streaming)・B(Direct)の出力が基準実装と文字列として一致すること(上記の範囲のデータで)と、その性能・割り当て量の計測(3 回)
 - 1000×50(Event 5 万件)での変換時間・出力サイズの計測(3 回)と、サイズ差の内訳
 - 上記「仕様判断」「問題点」の 1〜3、5 の挙動(テストで確認)
 
@@ -254,7 +341,9 @@ OpenAPI 側で 0 のフィールドが `required` になっている場合は、
 - Java 17 での実行(ビルドは `release 17` 指定だが、実行は Java 21 のみ)
 - Windows / macOS など他 OS での動作
 - 他社側のクライアント(OpenAPI 生成コード等)で、出力 JSON がどう解釈されるか
-- メモリ使用量(ピークヒープ)と GC の影響の計測
-- 改善案(ストリーミング変換等)の効果
+- ピークヒープ使用量と GC 時間の計測(割り当て総量は計測したが、ピークや GC ログは取得していない)
+- B が速い理由のプロファイラによる裏付け
+- B の出力が JsonFormat と一致することの網羅的な保証(テストした型・値の範囲外。map・group・Printer オプションは未対応)
+- 出力先を `OutputStream`(UTF-8 バイト列)にした場合の性能(今回はすべて `String` 生成で比較)
 - 1000×50 を超える大規模データ、並行実行時の性能
 - grpc-java と protobuf-java 4.x の組み合わせの公式サポート状況

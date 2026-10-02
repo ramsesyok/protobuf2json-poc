@@ -1,0 +1,18 @@
+// テスト専用: 宣言順とフィールド番号順が異なるメッセージ(JSON のキー順の確認用)
+syntax = "proto3";
+package ordertest;
+option java_multiple_files = true;
+option java_package = "demo.proto.ordertest";
+
+message OutOfOrder {
+  int64 z = 5;
+  string name = 3;
+  int64 a = 1;
+  Inner inner = 4;
+  repeated int64 ids = 2;
+}
+
+message Inner {
+  string s = 9;
+  int64 x = 2;
+}

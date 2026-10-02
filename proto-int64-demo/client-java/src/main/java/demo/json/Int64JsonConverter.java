@@ -193,7 +193,7 @@ public final class Int64JsonConverter {
                 "Unexpected JSON value for int64 field " + field.getFullName() + ": " + value);
     }
 
-    private static boolean isWellKnownType(Descriptor descriptor) {
+    static boolean isWellKnownType(Descriptor descriptor) {
         return WELL_KNOWN_TYPES_PACKAGE.equals(descriptor.getFile().getPackage());
     }
 }

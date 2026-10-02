@@ -137,6 +137,25 @@ class GrpcIntegrationTest {
     }
 
     @Test
+    @DisplayName("Streaming / Direct 版もサーバ由来データ(パターン1〜3)で基準実装と文字列一致")
+    void alternativesMatchReference() {
+        assumeTrue(serverAvailable, "gRPC server not running");
+        StreamingInt64JsonConverter streaming = new StreamingInt64JsonConverter();
+        DirectInt64JsonWriter direct = new DirectInt64JsonWriter();
+        for (boolean includeResult : new boolean[]{false, true}) {
+            SimLog msg = stub.getSimLog(req(includeResult, OBJECTS, EVENTS));
+            String expected = converter.toJson(msg);
+            assertEquals(expected, streaming.toJson(msg));
+            assertEquals(expected, direct.toJson(msg));
+        }
+        List<ObjectLog> streamed = new ArrayList<>();
+        stub.streamObjectLogs(req(false, OBJECTS, EVENTS)).forEachRemaining(streamed::add);
+        String expected = converter.toNdjson(streamed);
+        assertEquals(expected, streaming.toNdjson(streamed));
+        assertEquals(expected, direct.toNdjson(streamed));
+    }
+
+    @Test
     @DisplayName("文字列フィールドの特殊値(数字のみ・改行・ダブルクォート・日本語)が保持される")
     void specialStrings() throws Exception {
         assumeTrue(serverAvailable, "gRPC server not running");
