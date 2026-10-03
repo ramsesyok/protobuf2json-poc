@@ -1,5 +1,7 @@
 # 出力サンプル
 
+> ライブラリ全体の説明は [`src/README.md`](../../README.md) を参照してください。
+
 `OutputSamplesExample` で Go の動作テスト用サーバ(`src/go`)から受信したデータを `ProtoJsonPrinter` で JSON にした結果です。
 データ量は ObjectLog 2 件 × Event 3 件(`GetSimLogRequest{object_count: 2, events_per_object: 3}`)。
 
