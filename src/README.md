@@ -20,8 +20,9 @@ src/
       WellKnownTypes.java     (内部)Timestamp / Duration / ラッパー型 / Any 等の書き出し
       package-info.java       仕様の説明(出力規則・JsonFormat との違い・制約)
     src/test/...            テスト(下記)
+  examples/             利用例(ライブラリを使うアプリの立場で書いた別の Maven プロジェクト。下記「利用例」)
   go/                   動作テスト用の gRPC サーバ(Go、厳密な検証はしていない)
-  proto/simlog.proto    動作テスト用の proto(Go サーバと Java の統合テストで共有)
+  proto/simlog.proto    動作テスト用の proto(Go サーバ・Java の統合テスト・利用例で共有)
 ```
 
 ## 使い方
@@ -57,6 +58,59 @@ ProtoJsonPrinter withAny = ProtoJsonPrinter.builder()
 ```json
 {"jobId":9007199254740993,"logs":[{"timestamp":1700000000000,"events":[{"eventType":1,"commEvent":{"fromId":-1,"toId":42,"body":"12345"}}]}],"result":{"exitCode":-9223372036854775808,"output":"9223372036854775807"}}
 ```
+
+## 利用例(`examples/`): log を 1 レコードずつ JSON にする
+
+`examples/` は本ライブラリを通常の依存として使う、独立した Maven プロジェクトです。Go の動作テスト用サーバから
+SimLog を受信し、`logs` の各レコード(ObjectLog)を 1 件ずつ JSON にします。
+
+| クラス | 内容 | 向いている用途 |
+|---|---|---|
+| `PerRecordJsonExample` | `GetSimLog`(unary)で SimLog 全体を受信し、`logs` の各レコードを `printer.print(log)` で 1 件ずつ JSON 文字列にする | レコードごとに保存・送信する(DB の 1 行、メッセージキューの 1 メッセージ等) |
+| `StreamingNdjsonExample` | `StreamObjectLogs`(server streaming)で 1 レコードずつ受信し、受信するたびに `NdjsonWriter` で NDJSON の 1 行として書き出す | 件数が多い、HTTP のストリーミング応答、ファイル出力(全件をメモリに溜めない) |
+
+要点だけ抜き出すと次のとおりです。
+
+```java
+ProtoJsonPrinter printer = ProtoJsonPrinter.create();   // 1 つ作って使い回す
+
+// 例 1: 受信済みの SimLog から 1 レコードずつ
+for (ObjectLog log : simLog.getLogsList()) {
+    String json = printer.print(log);                    // 1 レコード → 1 つの JSON(改行なし)
+    save(json);
+}
+
+// 例 2: server streaming で受信するたびに 1 行
+try (NdjsonWriter writer = printer.ndjsonWriter(out)) {  // close で out も閉じる
+    Iterator<ObjectLog> it = stub.streamObjectLogs(request);
+    while (it.hasNext()) {
+        writer.write(it.next());                         // 1 レコード → 1 行(末尾 \n)
+        writer.flush();                                  // 逐次届けたい場合
+    }
+}
+```
+
+実行方法(Go サーバを起動しておく):
+
+```bash
+mvn -f src/java install -DskipTests          # ライブラリをローカルリポジトリへ(初回・ライブラリ変更時)
+cd src/examples
+mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples.PerRecordJsonExample \
+    -Dexec.args="localhost:50051 3 3"         # 接続先 ObjectLog件数 1件あたりのEvent数
+mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples.StreamingNdjsonExample \
+    -Dexec.args="localhost:50051 3 3 -"       # 最後の引数は出力先ファイル("-" は標準出力)
+mvn test                                     # 例の処理の確認(サーバが無ければ 2 件ともスキップ)
+```
+
+`PerRecordJsonExample` の実際の出力(先頭 2 件):
+
+```
+record[0] {"timestamp":1700000000000,"events":[{"eventType":1,"commEvent":{"fromId":-1,"toId":42,"body":"12345"}},{"eventId":1,"eventType":-1,"execEvent":{"execId":9223372036854775807,"command":"a\nb","result":"say \"hi\""}},{"eventId":2,"eventType":42}]}
+record[1] {"timestamp":1700000000001,"objectId":1,"events":[{"eventId":3,"eventType":9007199254740993,"commEvent":{"fromId":42,"toId":9007199254740993,"body":"a\nb"}},{"eventId":4,"eventType":9223372036854775807,"execEvent":{"execId":-9223372036854775808,"command":"say \"hi\"","result":"日本語テキスト"}},{"eventId":5,"eventType":-9223372036854775808}]}
+```
+
+`record[0]` に `objectId` と最初の Event の `eventId` が無いのは、値が 0 のため(デフォルト値はキーごと省略する仕様)。
+`StreamingNdjsonExample` は同じ内容を `record[n]` 無しで 1 行ずつ出力します(テストで 2 つの例の出力が一致することを確認)。
 
 ## 出力規則
 
