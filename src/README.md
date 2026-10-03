@@ -14,13 +14,13 @@ src/
   java/                 ライブラリ本体とテスト(Maven、Java 17 以上)
     src/main/java/io/github/ramsesyok/protojson/
       ProtoJsonPrinter.java   利用者向けの入口(JSON 文字列 / OutputStream / Writer / JsonGenerator へ出力)
-      NdjsonWriter.java       NDJSON(1 メッセージ 1 行)の書き出し
       MessageLayout.java      (内部)message 型ごとの出力手順のキャッシュ、未対応の型の検出
       ScalarValues.java       (内部)スカラー値の書き出し規則 ★int64 を数値にしている箇所
       WellKnownTypes.java     (内部)Timestamp / Duration / ラッパー型 / Any 等の書き出し
       package-info.java       仕様の説明(出力規則・JsonFormat との違い・制約)
     src/test/...            テスト(下記)
   examples/             利用例(ライブラリを使うアプリの立場で書いた別の Maven プロジェクト。下記「利用例」)
+                        NDJSON の書き出し(NdjsonWriter)もここにある(ライブラリには含めていない)
   go/                   動作テスト用の gRPC サーバ(Go、厳密な検証はしていない)
   proto/simlog.proto    動作テスト用の proto(Go サーバ・Java の統合テスト・利用例で共有)
 ```
@@ -31,16 +31,13 @@ src/
 // 不変・スレッドセーフ。アプリケーションで 1 つ作って使い回す
 ProtoJsonPrinter printer = ProtoJsonPrinter.create();
 
-// 1 メッセージ → JSON
+// 1 メッセージ → JSON(結果は常に 1 行。文字列中の改行はエスケープされる)
 String json = printer.print(simLog);
 printer.writeTo(simLog, response.getOutputStream());   // UTF-8 で直接書く(文字列を作らないので速い)
 
-// NDJSON(1 メッセージ 1 行、各行末に \n)
-try (NdjsonWriter writer = printer.ndjsonWriter(response.getOutputStream())) {
-    Iterator<ObjectLog> it = stub.streamObjectLogs(request);   // gRPC server streaming
-    while (it.hasNext()) {
-        writer.write(it.next());
-    }
+// log を 1 レコードずつ JSON にする(DB に保存する等)
+for (ObjectLog log : simLog.getLogsList()) {
+    repository.save(printer.print(log));
 }
 
 // 他の JSON に埋め込む
@@ -52,6 +49,10 @@ ProtoJsonPrinter withAny = ProtoJsonPrinter.builder()
         .typeRegistry(JsonFormat.TypeRegistry.newBuilder().add(MyMessage.getDescriptor()).build())
         .build();
 ```
+
+本ライブラリの責務は「1 メッセージ → JSON」だけです。NDJSON(1 行 1 レコードのファイル・ストリーム)が必要な場合は、
+`examples/` の `NdjsonWriter`(公開 API の `writeTo(message, JsonGenerator)` だけで作った 70 行ほどのクラス)を
+コピーして使ってください。
 
 出力例(`proto/simlog.proto` の SimLog):
 
@@ -69,6 +70,7 @@ SimLog を受信し、`logs` の各レコード(ObjectLog)を 1 件ずつ JSON �
 | `PerRecordJsonExample` | `GetSimLog`(unary)で SimLog 全体を受信し、`logs` の各レコードを `printer.print(log)` で 1 件ずつ JSON 文字列にする | レコードごとに保存・送信する(DB の 1 行、メッセージキューの 1 メッセージ等) |
 | `StreamingNdjsonExample` | `StreamObjectLogs`(server streaming)で 1 レコードずつ受信し、受信するたびに `NdjsonWriter` で NDJSON の 1 行として書き出す | 件数が多い、HTTP のストリーミング応答、ファイル出力(全件をメモリに溜めない) |
 | `OutputSamplesExample` | 出力サンプルを作る: SimLog 全体(result あり / なし)と ObjectLog 1 レコードの JSON を、実際の出力と整形版の両方で `samples/` に書き出す | 出力形式の確認(**結果は `examples/samples/` にコミット済み**) |
+| `NdjsonWriter` | NDJSON(1 メッセージ 1 行、行末 `\n`)の書き出し。ライブラリの公開 API `writeTo(message, JsonGenerator)` だけで作っている | NDJSON が必要な場合にコピーして使う(ライブラリ側はこのクラスに依存しない) |
 
 ### 出力サンプル(`examples/samples/`)
 
@@ -97,7 +99,7 @@ for (ObjectLog log : simLog.getLogsList()) {
 }
 
 // 例 2: server streaming で受信するたびに 1 行
-try (NdjsonWriter writer = printer.ndjsonWriter(out)) {  // close で out も閉じる
+try (NdjsonWriter writer = new NdjsonWriter(printer, out)) {  // examples の NdjsonWriter。close で out も閉じる
     Iterator<ObjectLog> it = stub.streamObjectLogs(request);
     while (it.hasNext()) {
         writer.write(it.next());                         // 1 レコード → 1 行(末尾 \n)
@@ -117,7 +119,7 @@ mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples
     -Dexec.args="localhost:50051 3 3 -"       # 最後の引数は出力先ファイル("-" は標準出力)
 mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples.OutputSamplesExample \
     -Dexec.args="localhost:50051 samples"     # 出力サンプルの作り直し
-mvn test                                     # 例の処理と samples/ が最新であることの確認(サーバが無ければ 3 件ともスキップ)
+mvn test                                     # 例の処理・NdjsonWriter・samples/ が最新であることの確認(サーバが無ければ 3 件スキップ)
 ```
 
 `PerRecordJsonExample` の実際の出力(先頭 2 件):
@@ -198,10 +200,10 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 
 | テストクラス | 件数 | 内容 |
 |---|---:|---|
-| `ProtoJsonPrinterTest` | 34 | 振る舞いの仕様。期待値を JSON 文字列で書いているので、出力規則の具体例として読める。int64 系の境界値、数字だけの string、presence(デフォルト値・optional・oneof・空 message)、キー名と順序、enum(未知の値)・bytes・float / double の特殊値・エスケープ、全 WKT、Any と TypeRegistry、範囲外の Timestamp / Duration、未対応の構造の例外、OutputStream / Writer / JsonGenerator への出力、Builder / DynamicMessage、8 スレッドでの同時使用、NDJSON |
+| `ProtoJsonPrinterTest` | 34 | 振る舞いの仕様。期待値を JSON 文字列で書いているので、出力規則の具体例として読める。int64 系の境界値、数字だけの string、presence(デフォルト値・optional・oneof・空 message)、キー名と順序、enum(未知の値)・bytes・float / double の特殊値・エスケープ、全 WKT、Any と TypeRegistry、範囲外の Timestamp / Duration、未対応の構造の例外、OutputStream / Writer / JsonGenerator への出力、Builder / DynamicMessage、8 スレッドでの同時使用、出力が常に 1 行であること(乱数データ 500 件)、repeated の各要素を 1 件ずつ JSON にできること |
 | `JsonFormatCompatibilityTest` | 7 | **JsonFormat との互換性**。乱数(シード固定)で全型・WKT・oneof・特殊値を埋めた AllTypes 5,000 件と DynamicMessage 版 5,000 件、宣言順≠番号順の型 500 件、Builder 200 件で、出力が「JsonFormat の出力の int64 だけを数値にしたもの」(`JsonFormatOracle`)と**文字列として完全一致**し、OutputStream 出力とも一致することを確認 |
 | `TimestampFormatTest` | 2 | 自前の Timestamp 書式が `Timestamps.toString` と一致(0001〜9999 年の 20 万件 + 閏日・1582 年のグレゴリオ暦切り替え前後・最小 / 最大)、範囲外で同じ例外 |
-| `GrpcEndToEndTest` | 2 | Go サーバから受信した SimLog(result なし / あり)の JSON と、server streaming で受信した ObjectLog の NDJSON(利用例を兼ねる) |
+| `GrpcEndToEndTest` | 2 | Go サーバから受信した SimLog(result なし / あり)の JSON と、server streaming で受信した ObjectLog を 1 件ずつ JSON にしたもの(利用例を兼ねる) |
 
 テスト専用の proto は `java/src/test/proto/` にあります(`protojson_test.proto`: 全型、`protojson_test_proto2.proto`: proto2 の確認用)。
 
@@ -209,7 +211,8 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 
 **実行して確認したこと**
 
-- `mvn clean test`: **45 件すべて成功**(Go サーバ起動時。停止時は統合テスト 2 件がスキップされ 43 件成功)。
+- `mvn clean test`(`src/java`): **45 件すべて成功**(Go サーバ起動時。停止時は統合テスト 2 件がスキップされ 43 件成功)。
+  `src/examples` の `mvn test`: 6 件すべて成功(サーバ停止時は 3 件スキップ)。
   Java 21.0.12.1 と **Java 17.0.20.1** の両方で確認
 - 本体コードのコンパイル警告なし(`-Xlint:all`)
 - **テストの検出力**: 本体をわざと壊して実行し(10 種)、すべてテストが失敗することを確認して元に戻した
@@ -218,13 +221,12 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
   |---|---:|
   | int64 を文字列で出力 | 22 |
   | uint32 を符号付きで出力 | 7 |
-  | oneof の判定を無視 | 29 |
+  | oneof の判定を無視 | 30 |
   | デフォルト値を省略しない | 41 |
   | キー順を宣言順にする | 2 |
   | Timestamp のマイクロ秒精度を 9 桁で出力 | 8 |
   | Timestamp を秒数で出力 | 8 |
   | map を検出しない | 1 |
-  | NDJSON の行頭に空白が入る(Jackson の既定の区切り) | 2 |
   | UTF-8 出力で絵文字をエスケープする(下記の不具合の再現) | 8 |
 
 - **開発中にテストで見つけて直した不具合**: Jackson 2.x の既定では、OutputStream(UTF-8)に書く場合だけ絵文字などの
@@ -235,11 +237,13 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 
   | ケース | 最小 [ms] | 割り当て [MB/回] |
   |---|---:|---:|
-  | JsonFormat.print(int64 は文字列、参考) | 54–56 | 128–133 |
-  | `ProtoJsonPrinter.print`(String) | 25–27 | 33–39 |
-  | `ProtoJsonPrinter.writeTo(OutputStream)` | **20** | **6–12** |
-  | `printNdjson`(String) | 25–26 | 33–38 |
-  | `NdjsonWriter`(OutputStream) | 21–22 | 15–20 |
+  | JsonFormat.print(int64 は文字列、参考) | 53–54 | 128–133 |
+  | `ProtoJsonPrinter.print`(SimLog 全体 → String) | 24 | 33–39 |
+  | `ProtoJsonPrinter.writeTo`(SimLog 全体 → OutputStream) | **19–20** | **6–12** |
+  | 1 レコードずつ `print`(logs の 1000 件それぞれ → String) | 27–28 | 40–45 |
+  | 1 レコードずつ `writeTo`(logs の 1000 件それぞれ → OutputStream) | 21 | 7–12 |
+
+  1 レコードずつ JSON にしても、全体を 1 回で JSON にする場合とほぼ同じ時間で済む。
 
 **確認していないこと**
 
@@ -251,8 +255,9 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 
 ## 移植・転用するとき
 
-1. `java/src/main/java/io/github/ramsesyok/protojson/` の 6 ファイルをコピーし、パッケージ名を変える
-   (クラス間の参照は同一パッケージ内だけ)。
+1. `java/src/main/java/io/github/ramsesyok/protojson/` の 5 ファイルをコピーし、パッケージ名を変える
+   (クラス間の参照は同一パッケージ内だけ)。NDJSON が必要なら `examples/` の `NdjsonWriter.java` も持っていく
+   (ライブラリ側からは参照していないので、不要なら持っていかなくてよい)。
 2. 依存に protobuf-java / protobuf-java-util / jackson-core(2.18.0 以上)を追加する。
    protobuf-java のバージョンは利用側の生成コードに合わせる。
 3. `java/src/test/` のテストも持っていくことを推奨。特に `JsonFormatCompatibilityTest` は、protobuf-java や Jackson を

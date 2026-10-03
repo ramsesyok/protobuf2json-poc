@@ -67,7 +67,12 @@ public final class ProtoJsonPrinter {
     // 利用者向け API
     // ============================================================================================
 
-    /** message を JSON 文字列(1 行、改行なし)にする。 */
+    /**
+     * message を JSON 文字列にする。
+     *
+     * <p>結果は常に 1 行(改行文字を含まない)。文字列フィールド中の改行は JSON のエスケープ({@code \n})になる。
+     * そのため、レコードごとに DB へ保存する、1 行 1 レコードのファイル(NDJSON)に追記する、といった使い方ができる。
+     */
     public String print(MessageOrBuilder message) {
         StringWriter out = new StringWriter();
         try {
@@ -112,32 +117,6 @@ public final class ProtoJsonPrinter {
     public void writeTo(MessageOrBuilder message, JsonGenerator generator) throws IOException {
         Objects.requireNonNull(message, "message");
         writeMessage(message, generator);
-    }
-
-    /** 各 message を 1 行 1 JSON にし、各行末に {@code \n} を付けて連結した NDJSON 文字列を返す。 */
-    public String printNdjson(Iterable<? extends MessageOrBuilder> messages) {
-        StringWriter out = new StringWriter();
-        try (NdjsonWriter w = ndjsonWriter(out)) {
-            for (MessageOrBuilder m : messages) {
-                w.write(m);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e); // StringWriter では発生しない
-        }
-        return out.toString();
-    }
-
-    /**
-     * NDJSON を UTF-8 で書き出す {@link NdjsonWriter} を作る。gRPC の server streaming で 1 件ずつ受け取る場合など、
-     * 件数が多いときに使う。{@link NdjsonWriter#close()} で {@code out} も閉じる。
-     */
-    public NdjsonWriter ndjsonWriter(OutputStream out) throws IOException {
-        return new NdjsonWriter(this, jsonFactory.createGenerator(out, JsonEncoding.UTF8));
-    }
-
-    /** NDJSON を書き出す {@link NdjsonWriter} を作る。{@link NdjsonWriter#close()} で {@code out} も閉じる。 */
-    public NdjsonWriter ndjsonWriter(Writer out) throws IOException {
-        return new NdjsonWriter(this, jsonFactory.createGenerator(out));
     }
 
     // ============================================================================================

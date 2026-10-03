@@ -13,16 +13,17 @@
  * // スレッドセーフなので 1 つ作って使い回す
  * ProtoJsonPrinter printer = ProtoJsonPrinter.create();
  *
- * String json = printer.print(message);              // 1 メッセージ → JSON 文字列
- * printer.writeTo(message, outputStream);            // UTF-8 で直接書き出す(推奨: 文字列を作らない)
+ * String json = printer.print(message);              // 1 メッセージ → JSON 文字列(常に 1 行)
+ * printer.writeTo(message, outputStream);            // UTF-8 で直接書き出す(文字列を作らない)
  *
- * // NDJSON(JSON Lines): 1 メッセージ 1 行
- * try (NdjsonWriter w = printer.ndjsonWriter(outputStream)) {
- *     for (ObjectLog log : logs) {
- *         w.write(log);
- *     }
+ * // log を 1 レコードずつ JSON にする(DB に保存する等)
+ * for (ObjectLog log : simLog.getLogsList()) {
+ *     repository.save(printer.print(log));
  * }
  * }</pre>
+ *
+ * NDJSON(1 行 1 レコード)の書き出しは本ライブラリには含めていない。利用例(src/examples の
+ * {@code NdjsonWriter})を参照。
  *
  * <h2>出力規則(JsonFormat の既定と同じもの)</h2>
  * <ul>
@@ -61,7 +62,6 @@
  * <h2>クラス構成</h2>
  * <ul>
  *   <li>{@link io.github.ramsesyok.protojson.ProtoJsonPrinter}: 利用者向けの入口。message を JSON に書き出す</li>
- *   <li>{@link io.github.ramsesyok.protojson.NdjsonWriter}: 1 メッセージ 1 行の NDJSON を書き出す</li>
  *   <li>{@code MessageLayout}(内部): message 型ごとの出力手順(フィールド順・JSON キー名)のキャッシュと、未対応の型の検出</li>
  *   <li>{@code ScalarValues}(内部): スカラー値(数値・文字列・enum・bytes 等)の書き出し規則</li>
  *   <li>{@code WellKnownTypes}(内部): Timestamp / Duration / ラッパー型等の書き出し</li>
