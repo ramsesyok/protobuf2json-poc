@@ -397,40 +397,48 @@ class ProtoJsonPrinterTest {
     }
 
     @org.junit.jupiter.api.Nested
-    @DisplayName("NDJSON")
-    class Ndjson {
-
-        private final List<Nested> messages = List.of(
-                Nested.newBuilder().setId(Long.MAX_VALUE).setName("a\nb").build(),
-                Nested.getDefaultInstance(),
-                Nested.newBuilder().setId(-1).addValues(9007199254740993L).build());
+    @DisplayName("1 レコードずつの JSON 化")
+    class PerRecord {
 
         @Test
-        @DisplayName("1 メッセージ 1 行・各行末に \\n・文字列中の改行はエスケープされ行は割れない")
-        void printNdjson() throws Exception {
-            String nd = printer.printNdjson(messages);
-            assertEquals("{\"id\":9223372036854775807,\"name\":\"a\\nb\"}\n{}\n{\"id\":-1,\"values\":[9007199254740993]}\n", nd);
-            String[] lines = nd.split("\n", -1);
-            assertEquals(messages.size() + 1, lines.length); // 最後は空文字(末尾の \n の後)
-            for (int i = 0; i < messages.size(); i++) {
-                assertEquals(printer.print(messages.get(i)), lines[i]);
-                MAPPER.readTree(lines[i]); // 各行が単独でパースできる
+        @DisplayName("出力は常に 1 行(文字列中の改行・復帰・行区切り文字はエスケープされ、改行文字を含まない)")
+        void alwaysSingleLine() throws Exception {
+            RandomMessages random = new RandomMessages(11, 3);
+            ProtoJsonPrinter withRegistry = ProtoJsonPrinter.builder()
+                    .typeRegistry(JsonFormat.TypeRegistry.newBuilder().add(Nested.getDescriptor()).build())
+                    .build();
+            List<AllTypes> messages = new ArrayList<>();
+            messages.add(AllTypes.newBuilder().setFString("a\nb\r\nc").addRString("\n").build());
+            for (int i = 0; i < 500; i++) {
+                messages.add((AllTypes) random.next(AllTypes.newBuilder())); // 制御文字を含む文字列も生成される
             }
-            assertEquals("", printer.printNdjson(List.of()));
+            for (AllTypes m : messages) {
+                String json = withRegistry.print(m);
+                assertFalse(json.contains("\n") || json.contains("\r"), json);
+                MAPPER.readTree(json); // 単独でパースできる
+            }
+            assertEquals("{\"fString\":\"a\\nb\\r\\nc\",\"rString\":[\"\\n\"]}", printer.print(messages.get(0)));
         }
 
         @Test
-        @DisplayName("NdjsonWriter(OutputStream)は printNdjson と同じ内容を UTF-8 で書き、close で出力先も閉じる")
-        void ndjsonWriter() throws IOException {
-            CloseTrackingOutputStream out = new CloseTrackingOutputStream();
-            try (NdjsonWriter w = printer.ndjsonWriter(out)) {
-                for (Nested m : messages) {
-                    w.write(m);
-                    w.flush();
-                }
+        @DisplayName("SimLog の logs のような repeated の各要素を、そのまま 1 件ずつ JSON にできる")
+        void eachElementOfRepeated() throws Exception {
+            AllTypes parent = AllTypes.newBuilder()
+                    .addRNested(Nested.newBuilder().setId(Long.MAX_VALUE).setName("a\nb"))
+                    .addRNested(Nested.getDefaultInstance())
+                    .addRNested(Nested.newBuilder().setId(-1).addValues(9007199254740993L))
+                    .build();
+            List<String> records = new ArrayList<>();
+            for (Nested record : parent.getRNestedList()) {
+                records.add(printer.print(record));
             }
-            assertEquals(printer.printNdjson(messages), out.toString(StandardCharsets.UTF_8));
-            assertTrue(out.closed);
+            assertEquals(List.of("{\"id\":9223372036854775807,\"name\":\"a\\nb\"}", "{}",
+                    "{\"id\":-1,\"values\":[9007199254740993]}"), records);
+            // 親をまとめて JSON にした結果の各要素と同じ内容
+            JsonNode whole = MAPPER.readTree(printer.print(parent)).get("rNested");
+            for (int i = 0; i < records.size(); i++) {
+                assertEquals(whole.get(i), MAPPER.readTree(records.get(i)));
+            }
         }
     }
 

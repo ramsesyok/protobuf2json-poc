@@ -14,9 +14,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Go の動作テスト用サーバ(src/go)から gRPC で受信したデータを JSON / NDJSON にする統合テスト(利用例を兼ねる)。
+ * Go の動作テスト用サーバ(src/go)から gRPC で受信したデータを JSON にする統合テスト(利用例を兼ねる)。
  * 接続先は system property {@code grpc.target}(既定 localhost:50051)。サーバに接続できなければスキップする。
  */
 @DisplayName("gRPC 統合テスト(Go サーバ)")
@@ -90,33 +90,29 @@ class GrpcEndToEndTest {
     }
 
     @Test
-    @DisplayName("StreamObjectLogs で 1 件ずつ受信して NDJSON に(GetSimLog の logs と同じ内容)")
-    void streamToNdjson() throws Exception {
+    @DisplayName("StreamObjectLogs で 1 件ずつ受信して 1 レコードずつ JSON に(GetSimLog の logs と同じ内容)")
+    void streamEachRecord() throws Exception {
         assumeTrue(serverAvailable, "gRPC server not running");
 
-        // ---- 利用例: server streaming で受信した ObjectLog を 1 件ずつ NDJSON の 1 行として書き出す ----
-        ByteArrayOutputStream out = new ByteArrayOutputStream(); // 実際は HTTP 応答の OutputStream 等
-        try (NdjsonWriter writer = printer.ndjsonWriter(out)) {
-            Iterator<ObjectLog> it = stub.streamObjectLogs(request(false, OBJECTS, EVENTS));
-            while (it.hasNext()) {
-                writer.write(it.next());
-            }
+        // ---- 利用例: server streaming で受信した ObjectLog を 1 件ずつ JSON にする(DB に保存する等) ----
+        List<String> records = new ArrayList<>();
+        Iterator<ObjectLog> it = stub.streamObjectLogs(request(false, OBJECTS, EVENTS));
+        while (it.hasNext()) {
+            records.add(printer.print(it.next())); // 実際はここで保存・送信する
         }
-        // -------------------------------------------------------------------------------------------
+        // ------------------------------------------------------------------------------------------------
 
-        String ndjson = out.toString(StandardCharsets.UTF_8);
         SimLog whole = stub.getSimLog(request(false, OBJECTS, EVENTS));
-        assertEquals(printer.printNdjson(whole.getLogsList()), ndjson);
-
-        String[] lines = ndjson.split("\n");
-        assertEquals(OBJECTS, lines.length);
+        assertEquals(OBJECTS, records.size());
         boolean sawEscapedNewline = false;
-        for (int i = 0; i < lines.length; i++) {
-            assertEquals(oracle.expected(whole.getLogs(i)), lines[i]);
-            checkTypes(MAPPER.readTree(lines[i]));
-            sawEscapedNewline |= lines[i].contains("a\\nb");
+        for (int i = 0; i < records.size(); i++) {
+            String json = records.get(i);
+            assertEquals(oracle.expected(whole.getLogs(i)), json);
+            assertFalse(json.contains("\n"), "1 レコードは 1 行");
+            checkTypes(MAPPER.readTree(json));
+            sawEscapedNewline |= json.contains("a\\nb");
         }
-        assertTrue(sawEscapedNewline, "データに改行を含む文字列があり、1 行に収まっていること");
+        assertTrue(sawEscapedNewline, "データに改行を含む文字列があり、エスケープされていること");
     }
 
     /** int64 のキーは整数値、string のキーは文字列であることを確認し、確認した int64 の個数を返す。 */

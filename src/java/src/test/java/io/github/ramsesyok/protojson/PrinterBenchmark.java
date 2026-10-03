@@ -8,7 +8,6 @@ import demo.proto.ObjectLog;
 import demo.proto.Result;
 import demo.proto.SimLog;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
@@ -44,15 +43,15 @@ public final class PrinterBenchmark {
         run("JsonFormat.print(int64 は文字列、参考)", () -> sink = jsonFormat.print(simLog));
         run("ProtoJsonPrinter.print(String)", () -> sink = printer.print(simLog));
         run("ProtoJsonPrinter.writeTo(OutputStream)", () -> printer.writeTo(simLog, discard));
-        run("ProtoJsonPrinter.printNdjson(logs)", () -> sink = printer.printNdjson(simLog.getLogsList()));
-        run("NdjsonWriter(OutputStream)", () -> {
-            ByteArrayOutputStream out = new ByteArrayOutputStream(8 << 20);
-            try (NdjsonWriter w = printer.ndjsonWriter(out)) {
-                for (ObjectLog log : simLog.getLogsList()) {
-                    w.write(log);
-                }
+        run("1 レコードずつ print(logs の各要素)", () -> {
+            for (ObjectLog log : simLog.getLogsList()) {
+                sink = printer.print(log);
             }
-            sink = out;
+        });
+        run("1 レコードずつ writeTo(OutputStream)", () -> {
+            for (ObjectLog log : simLog.getLogsList()) {
+                printer.writeTo(log, discard);
+            }
         });
     }
 

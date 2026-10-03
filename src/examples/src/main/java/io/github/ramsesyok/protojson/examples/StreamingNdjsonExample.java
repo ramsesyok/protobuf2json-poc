@@ -3,7 +3,6 @@ package io.github.ramsesyok.protojson.examples;
 import demo.proto.GetSimLogRequest;
 import demo.proto.ObjectLog;
 import demo.proto.SimServiceGrpc;
-import io.github.ramsesyok.protojson.NdjsonWriter;
 import io.github.ramsesyok.protojson.ProtoJsonPrinter;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -66,7 +65,7 @@ public final class StreamingNdjsonExample {
     public static long streamToNdjson(SimServiceGrpc.SimServiceBlockingStub stub, GetSimLogRequest request,
                                       ProtoJsonPrinter printer, OutputStream out) throws IOException {
         long lines = 0;
-        try (NdjsonWriter writer = printer.ndjsonWriter(out)) {
+        try (NdjsonWriter writer = new NdjsonWriter(printer, out)) {
             Iterator<ObjectLog> it = stub.streamObjectLogs(request); // 1 件ずつ受信する
             while (it.hasNext()) {
                 writer.write(it.next()); // 1 レコード → 1 行
