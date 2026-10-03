@@ -68,6 +68,22 @@ SimLog を受信し、`logs` の各レコード(ObjectLog)を 1 件ずつ JSON �
 |---|---|---|
 | `PerRecordJsonExample` | `GetSimLog`(unary)で SimLog 全体を受信し、`logs` の各レコードを `printer.print(log)` で 1 件ずつ JSON 文字列にする | レコードごとに保存・送信する(DB の 1 行、メッセージキューの 1 メッセージ等) |
 | `StreamingNdjsonExample` | `StreamObjectLogs`(server streaming)で 1 レコードずつ受信し、受信するたびに `NdjsonWriter` で NDJSON の 1 行として書き出す | 件数が多い、HTTP のストリーミング応答、ファイル出力(全件をメモリに溜めない) |
+| `OutputSamplesExample` | 出力サンプルを作る: SimLog 全体(result あり / なし)と ObjectLog 1 レコードの JSON を、実際の出力と整形版の両方で `samples/` に書き出す | 出力形式の確認(**結果は `examples/samples/` にコミット済み**) |
+
+### 出力サンプル(`examples/samples/`)
+
+| ファイル | 内容 |
+|---|---|
+| [`simlog-with-result.json`](examples/samples/simlog-with-result.json) / [`.pretty.json`](examples/samples/simlog-with-result.pretty.json) | SimLog 全体(result あり) |
+| [`simlog-without-result.json`](examples/samples/simlog-without-result.json) / [`.pretty.json`](examples/samples/simlog-without-result.pretty.json) | SimLog 全体(result なし。`result` キー自体が無い) |
+| [`objectlog-record.json`](examples/samples/objectlog-record.json) / [`.pretty.json`](examples/samples/objectlog-record.pretty.json) | ObjectLog の 1 レコードだけ |
+
+`.json` は実際の出力そのもの(1 行)、`.pretty.json` は読みやすく整形したもの(値は同じ)。見どころは
+[`examples/samples/README.md`](examples/samples/README.md) を参照。例えば ObjectLog 1 レコードの出力は次のとおり:
+
+```json
+{"timestamp":1700000000001,"objectId":1,"events":[{"eventId":3,"eventType":9007199254740993,"commEvent":{"fromId":42,"toId":9007199254740993,"body":"a\nb"}},{"eventId":4,"eventType":9223372036854775807,"execEvent":{"execId":-9223372036854775808,"command":"say \"hi\"","result":"日本語テキスト"}},{"eventId":5,"eventType":-9223372036854775808}]}
+```
 
 要点だけ抜き出すと次のとおりです。
 
@@ -99,7 +115,9 @@ mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples
     -Dexec.args="localhost:50051 3 3"         # 接続先 ObjectLog件数 1件あたりのEvent数
 mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples.StreamingNdjsonExample \
     -Dexec.args="localhost:50051 3 3 -"       # 最後の引数は出力先ファイル("-" は標準出力)
-mvn test                                     # 例の処理の確認(サーバが無ければ 2 件ともスキップ)
+mvn -q compile exec:java -Dexec.mainClass=io.github.ramsesyok.protojson.examples.OutputSamplesExample \
+    -Dexec.args="localhost:50051 samples"     # 出力サンプルの作り直し
+mvn test                                     # 例の処理と samples/ が最新であることの確認(サーバが無ければ 3 件ともスキップ)
 ```
 
 `PerRecordJsonExample` の実際の出力(先頭 2 件):

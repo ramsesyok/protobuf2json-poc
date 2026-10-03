@@ -15,11 +15,15 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -88,6 +92,27 @@ class ExamplesTest {
         JsonNode second = MAPPER.readTree(records.get(1));
         assertEquals(1, second.get("objectId").longValue());
         assertEquals(1700000000001L, second.get("timestamp").longValue());
+    }
+
+    @Test
+    @DisplayName("例 3: コミット済みの samples/ が現在の出力と一致し、整形版と値が同じで、result の有無が正しい")
+    void outputSamplesAreUpToDate() throws Exception {
+        assumeTrue(serverAvailable, "gRPC server not running");
+        Map<String, String> generated = OutputSamplesExample.createSamples(stub, printer);
+        assertEquals(6, generated.size());
+        for (Map.Entry<String, String> e : generated.entrySet()) {
+            Path committed = Path.of("samples", e.getKey());
+            assertEquals(e.getValue(), Files.readString(committed, StandardCharsets.UTF_8),
+                    committed + " が古い。OutputSamplesExample を実行して更新すること");
+        }
+        for (String name : List.of("simlog-with-result", "simlog-without-result", "objectlog-record")) {
+            String compact = generated.get(name + ".json");
+            assertEquals(1, compact.split("\n").length, "実際の出力は 1 行");
+            assertEquals(MAPPER.readTree(compact), MAPPER.readTree(generated.get(name + ".pretty.json")));
+        }
+        assertTrue(MAPPER.readTree(generated.get("simlog-with-result.json")).has("result"));
+        assertFalse(MAPPER.readTree(generated.get("simlog-without-result.json")).has("result"));
+        assertEquals(1, MAPPER.readTree(generated.get("objectlog-record.json")).get("objectId").longValue());
     }
 
     @Test
