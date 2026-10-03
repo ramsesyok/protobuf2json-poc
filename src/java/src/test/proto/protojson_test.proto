@@ -1,0 +1,132 @@
+// ProtoJsonPrinter の単体テスト用メッセージ(テスト専用)。
+syntax = "proto3";
+
+package protojson.test;
+
+option java_multiple_files = true;
+option java_package = "io.github.ramsesyok.protojson.testproto";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  COLOR_RED = 1;
+  COLOR_GREEN = 2;
+}
+
+message Nested {
+  int64 id = 1;
+  string name = 2;
+  Nested child = 3;
+  repeated int64 values = 4;
+}
+
+// すべてのフィールド型を 1 つずつ持つ。
+message AllTypes {
+  // 単数のスカラー(presence なし: デフォルト値なら出力されない)
+  int64 f_int64 = 1;
+  sint64 f_sint64 = 2;
+  sfixed64 f_sfixed64 = 3;
+  int32 f_int32 = 4;
+  sint32 f_sint32 = 5;
+  sfixed32 f_sfixed32 = 6;
+  uint32 f_uint32 = 7;
+  fixed32 f_fixed32 = 8;
+  uint64 f_uint64 = 9;
+  fixed64 f_fixed64 = 10;
+  bool f_bool = 11;
+  string f_string = 12;
+  bytes f_bytes = 13;
+  float f_float = 14;
+  double f_double = 15;
+  Color f_enum = 16;
+  Nested f_nested = 17;
+
+  // proto3 optional(presence あり: デフォルト値でも設定されていれば出力される)
+  optional int64 o_int64 = 20;
+  optional string o_string = 21;
+  optional Color o_enum = 22;
+  optional bool o_bool = 23;
+  optional double o_double = 24;
+
+  // repeated
+  repeated int64 r_int64 = 30;
+  repeated sint64 r_sint64 = 31;
+  repeated sfixed64 r_sfixed64 = 32;
+  repeated int32 r_int32 = 33;
+  repeated uint32 r_uint32 = 34;
+  repeated uint64 r_uint64 = 35;
+  repeated bool r_bool = 36;
+  repeated string r_string = 37;
+  repeated bytes r_bytes = 38;
+  repeated float r_float = 39;
+  repeated double r_double = 40;
+  repeated Color r_enum = 41;
+  repeated Nested r_nested = 42;
+
+  // oneof(2 つ)
+  oneof choice {
+    int64 c_int64 = 50;
+    string c_string = 51;
+    Nested c_nested = 52;
+    Color c_enum = 53;
+    google.protobuf.Timestamp c_timestamp = 54;
+  }
+  oneof second {
+    bool s_bool = 55;
+    double s_double = 56;
+  }
+
+  // Well-Known Types
+  google.protobuf.Timestamp w_timestamp = 60;
+  google.protobuf.Duration w_duration = 61;
+  google.protobuf.Int64Value w_int64 = 62;
+  google.protobuf.UInt64Value w_uint64 = 63;
+  google.protobuf.Int32Value w_int32 = 64;
+  google.protobuf.UInt32Value w_uint32 = 65;
+  google.protobuf.BoolValue w_bool = 66;
+  google.protobuf.StringValue w_string = 67;
+  google.protobuf.BytesValue w_bytes = 68;
+  google.protobuf.FloatValue w_float = 69;
+  google.protobuf.DoubleValue w_double = 70;
+  google.protobuf.Any w_any = 71;
+  google.protobuf.Struct w_struct = 72;
+  google.protobuf.Value w_value = 73;
+  google.protobuf.ListValue w_list = 74;
+  google.protobuf.FieldMask w_mask = 75;
+  google.protobuf.Empty w_empty = 76;
+  google.protobuf.NullValue w_null = 77;
+  repeated google.protobuf.Timestamp r_timestamp = 80;
+  repeated google.protobuf.Int64Value r_int64_value = 81;
+
+  // 再帰と json_name の指定
+  AllTypes recursive = 90;
+  int64 custom_json = 91 [json_name = "customJSON"];
+}
+
+// 宣言順とフィールド番号順が異なる(JSON のキーはフィールド番号順になる)
+message OutOfOrder {
+  int64 z = 5;
+  string name = 3;
+  int64 a = 1;
+  Nested inner = 4;
+  repeated int64 ids = 2;
+}
+
+// map を含む(未対応 → 例外になることの確認用)
+message WithMap {
+  int64 id = 1;
+  map<string, int64> counts = 2;
+}
+
+// ネストした先に map を含む
+message HasMapDeep {
+  Nested n = 1;
+  WithMap deep = 2;
+}
