@@ -166,8 +166,30 @@ JsonFormat のオプション(整形出力、`preservingProtoFieldNames`、`alwa
 - Java のコードで作った**単独サロゲート**(壊れた文字列)を含む string は、`print` / Writer では生の文字、
   OutputStream(UTF-8)では `\uD800` の形のエスケープで出力されます。gRPC で受信した文字列には含まれません
   (Protobuf のデコード時に `?` に置き換わるため)。
-- 例外が起きた場合、それまでに書いた不完全な JSON が出力先に残ることがあります。
-- message 型ごとの出力手順は Descriptor をキーにキャッシュし、削除しません(通常は生成コードの型の数で頭打ち)。
+- 例外が起きた場合、それまでに書いた不完全な JSON が出力先に残ることがあります(閉じ括弧は補わないので、
+  正しい JSON には見えません)。例外が起きたら出力を破棄してください(HTTP なら応答をエラーにする等)。
+- 入れ子が 1000 段を超えるメッセージは出力できません(`IllegalArgumentException`。Jackson の上限)。
+  gRPC で受信したメッセージは Protobuf の制限で 100 段までなので、通常は該当しません。
+- 型ごとの書き出し手順は `ProtoJsonPrinter` のインスタンスごとにキャッシュします(上限 1 万型)。
+  アプリで 1 つ作って使い回してください(リクエストごとに作ると、毎回キャッシュが空から始まり遅くなります)。
+
+## 製品組み込みの点検結果
+
+脆弱性・メモリリーク・例外処理などの観点で点検し、見つかった問題は修正してテストを追加しました(`RobustnessTest`)。
+
+| 観点 | 点検内容 | 結果 |
+|---|---|---|
+| 入力の安全性 | 外部から来たデータを解釈するか | 入力は既に Protobuf のメッセージになっているデータだけ。外部の JSON は読まない(Any / Struct 等で JsonFormat が作った JSON を読み直すだけ) |
+| 出力の安全性 | 値やキーに引用符・改行・制御文字があっても JSON が壊れないか | Jackson がエスケープするので壊れない(乱数で作った 1 万件超のメッセージで確認済み) |
+| 資源の使いすぎ | 入力に対して出力や処理が極端に大きくならないか | 出力は入力にほぼ比例(Base64 で約 4/3 倍、制御文字のエスケープで最大 6 倍)。ループや再帰は入力の大きさの範囲で終わる |
+| スタックオーバーフロー | 極端に深い入れ子 | Jackson の上限(1000 段)で止まり、`IllegalArgumentException` になる。**修正前は I/O の失敗と同じ `IOException`(`print` では `UncheckedIOException`)になっていた → 修正** |
+| 途中の失敗 | 失敗時に出力先に残るデータ | **修正前は Jackson が閉じ括弧を自動で補い、途中までのデータが正しい JSON に見える場合があった**(例: `{"rTimestamp":["1970-01-01T00:00:00Z"]}`)**→ 補わない設定に修正** |
+| データ依存の失敗 | 特定のデータのときだけ失敗しないか | **修正前は Struct / Any 等の中に 2000 万文字超の文字列や 5 万文字超のキーがあると失敗していた**(Jackson の読み込み上限)**→ 自分で作った JSON を読むときは上限を外すよう修正**。map 等の未対応の構造は、データではなく型の時点で必ず例外になる |
+| メモリリーク | キャッシュが増え続けないか、解放されるか | **修正前は static なキャッシュで上限も削除も無く、再デプロイ時のクラスローダリークや、実行時に型を作り続ける用途で増え続ける恐れがあった → printer ごとのキャッシュ + 上限 1 万型に修正**。printer を手放すと型の情報も GC で回収されることをテストで確認 |
+| 資源の閉じ忘れ | ファイル・スレッド等を持つか、出力先を勝手に閉じないか | 閉じる必要のある資源は持たない。内部の JsonGenerator / JsonParser は try-with-resources で必ず閉じる。利用者の出力先は閉じない(テストで確認) |
+| スレッドセーフ | 複数スレッドから同時に使えるか | 不変オブジェクト + ConcurrentHashMap。8 スレッドがそれぞれ 4,000 回ずつ同時に実行しても結果が一致することをテストで確認 |
+| 例外の種類 | 原因ごとに区別できるか | null → `NullPointerException`(引数名付き)、未対応の型 → `UnsupportedOperationException`、JSON にできない値 → `IllegalArgumentException`、書き込みの失敗 → `IOException` のみ。すべてテストで確認 |
+| 依存ライブラリ | 既知の脆弱性 | 実行時の依存は protobuf-java 4.36.2 / protobuf-java-util 4.36.2(推移的に gson 2.8.9、jsr305、error_prone_annotations)/ jackson-core 2.22.3。把握している範囲では、いずれも既知の脆弱性の修正版以降(protobuf-java の CVE-2024-7254、gson の CVE-2022-25647)。**この環境からは脆弱性データベース(OSV)に接続できず、照合はしていない**ので、組み込み先の CI で OWASP Dependency-Check / Dependabot 等による確認を推奨 |
 
 ## 依存ライブラリ
 
@@ -203,6 +225,7 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 | `ProtoJsonPrinterTest` | 34 | 振る舞いの仕様。期待値を JSON 文字列で書いているので、出力規則の具体例として読める。int64 系の境界値、数字だけの string、presence(デフォルト値・optional・oneof・空 message)、キー名と順序、enum(未知の値)・bytes・float / double の特殊値・エスケープ、全 WKT、Any と TypeRegistry、範囲外の Timestamp / Duration、未対応の構造の例外、OutputStream / Writer / JsonGenerator への出力、Builder / DynamicMessage、8 スレッドでの同時使用、出力が常に 1 行であること(乱数データ 500 件)、repeated の各要素を 1 件ずつ JSON にできること |
 | `JsonFormatCompatibilityTest` | 7 | **JsonFormat との互換性**。乱数(シード固定)で全型・WKT・oneof・特殊値を埋めた AllTypes 5,000 件と DynamicMessage 版 5,000 件、宣言順≠番号順の型 500 件、Builder 200 件で、出力が「JsonFormat の出力の int64 だけを数値にしたもの」(`JsonFormatOracle`)と**文字列として完全一致**し、OutputStream 出力とも一致することを確認 |
 | `TimestampFormatTest` | 2 | 自前の Timestamp 書式が `Timestamps.toString` と一致(0001〜9999 年の 20 万件 + 閏日・1582 年のグレゴリオ暦切り替え前後・最小 / 最大)、範囲外で同じ例外 |
+| `RobustnessTest` | 9 | 異常系: 深すぎる入れ子(スタックオーバーフローにならず `IllegalArgumentException`)、途中で失敗したときに正しい JSON に見える出力を残さない、Struct / Any の中の巨大な文字列・長いキー、キャッシュの上限・printer ごとの独立・GC での解放(メモリリークしない)、null の引数、書き込みの失敗 |
 | `GrpcEndToEndTest` | 2 | Go サーバから受信した SimLog(result なし / あり)の JSON と、server streaming で受信した ObjectLog を 1 件ずつ JSON にしたもの(利用例を兼ねる) |
 
 テスト専用の proto は `java/src/test/proto/` にあります(`protojson_test.proto`: 全型、`protojson_test_proto2.proto`: proto2 の確認用)。
@@ -211,10 +234,10 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 
 **実行して確認したこと**
 
-- `mvn clean test`(`src/java`): **45 件すべて成功**(Go サーバ起動時。停止時は統合テスト 2 件がスキップされ 43 件成功)。
+- `mvn clean test`(`src/java`): **54 件すべて成功**(Go サーバ起動時。停止時は統合テスト 2 件がスキップされ 52 件成功)。
   `src/examples` の `mvn test`: 6 件すべて成功(サーバ停止時は 3 件スキップ)。
   Java 21.0.12.1 と **Java 17.0.20.1** の両方で確認
-- 本体コードのコンパイル警告なし(`-Xlint:all`)
+- 本体コードのコンパイル警告なし(`-Xlint:all`)、Javadoc の文法チェック(`-Xdoclint:all`)も警告なし
 - **テストの検出力**: 本体をわざと壊して実行し(10 種)、すべてテストが失敗することを確認して元に戻した
 
   | 壊し方 | 失敗したテスト数 / 45 |
@@ -229,6 +252,10 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
   | map を検出しない | 1 |
   | UTF-8 出力で絵文字をエスケープする(下記の不具合の再現) | 8 |
 
+  製品組み込みの点検で直した 4 点も、元の動作に戻すと `RobustnessTest`(9 件)が失敗することを確認した:
+  閉じ括弧の自動補完を戻す → 1 件、深すぎる入れ子を `IOException` のままにする → 2 件、
+  読み直しを Jackson の既定の上限で行う → 1 件、キャッシュを static に戻す → 4 件、キャッシュの上限を無くす → 1 件
+
 - **開発中にテストで見つけて直した不具合**: Jackson 2.x の既定では、OutputStream(UTF-8)に書く場合だけ絵文字などの
   BMP 外の文字がサロゲートペアの Unicode エスケープになり、`print()` の出力とバイト列が異なっていた。
   既定の JsonFactory で `JsonWriteFeature.COMBINE_UNICODE_SURROGATES_IN_UTF8` を有効にして解消
@@ -238,10 +265,10 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
   | ケース | 最小 [ms] | 割り当て [MB/回] |
   |---|---:|---:|
   | JsonFormat.print(int64 は文字列、参考) | 53–54 | 128–133 |
-  | `ProtoJsonPrinter.print`(SimLog 全体 → String) | 24 | 33–39 |
+  | `ProtoJsonPrinter.print`(SimLog 全体 → String) | 24–26 | 33–39 |
   | `ProtoJsonPrinter.writeTo`(SimLog 全体 → OutputStream) | **19–20** | **6–12** |
   | 1 レコードずつ `print`(logs の 1000 件それぞれ → String) | 27–28 | 40–45 |
-  | 1 レコードずつ `writeTo`(logs の 1000 件それぞれ → OutputStream) | 21 | 7–12 |
+  | 1 レコードずつ `writeTo`(logs の 1000 件それぞれ → OutputStream) | 20–21 | 7–12 |
 
   1 レコードずつ JSON にしても、全体を 1 回で JSON にする場合とほぼ同じ時間で済む。
 
@@ -252,6 +279,8 @@ MAVEN_OPTS="-Dstdout.encoding=UTF-8" mvn -q test-compile exec:java -Dexec.classp
 - JsonFormat のオプション相当の出力(整形・proto 名のキー・デフォルト値の出力)は実装していない
 - Linux 以外の OS
 - Go サーバのテスト(動作テスト用のため作っていない。ビルドと Java 統合テストからの呼び出しのみ確認)
+- 依存ライブラリの脆弱性データベースとの照合(この環境から接続できなかった。上の「製品組み込みの点検結果」参照)
+- 長時間・高負荷での連続稼働(メモリの増え方は単体テストと設計で確認したが、負荷試験はしていない)
 
 ## 移植・転用するとき
 
